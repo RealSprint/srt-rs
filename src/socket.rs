@@ -1,4 +1,5 @@
 use crate::error;
+use crate::srt::srt_listen_callback_fn;
 
 use error::SrtError;
 use libsrt_sys as srt;
@@ -173,8 +174,21 @@ impl SrtSocket {
             }
         }
     }
-    pub fn listen(&self, backlog: i32) -> Result<()> {
+    pub fn listen(
+        &self,
+        backlog: i32,
+        callback: srt_listen_callback_fn,
+        callback_opaque: Option<*mut c_void>,
+    ) -> Result<()> {
         let result = unsafe { srt::srt_listen(self.id, backlog) };
+        error::handle_result((), result)?;
+
+        if callback.is_none() {
+            return Ok(());
+        }
+
+        let opaque = callback_opaque.unwrap_or(std::ptr::null_mut());
+        let result = unsafe { srt::srt_listen_callback(self.id, callback, opaque) };
         error::handle_result((), result)
     }
 }
@@ -727,7 +741,7 @@ impl SrtSocket {
         let result = unsafe {
             srt::srt_getsockflag(
                 self.id,
-                srt::SRT_SOCKOPT::SRTO_STATE,
+                srt::SRT_SOCKOPT::SRTO_STREAMID,
                 id.as_mut_ptr() as *mut c_void,
                 &mut id_len as *mut c_int,
             )

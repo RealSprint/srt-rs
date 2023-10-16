@@ -1,5 +1,6 @@
 pub mod error;
 mod socket;
+use crate::srt::srt_listen_callback_fn;
 
 use error::SrtError;
 use libsrt_sys as srt;
@@ -16,7 +17,7 @@ use std::{
     iter::Iterator,
     net::{SocketAddr, ToSocketAddrs},
     ops::Drop,
-    os::raw::c_int,
+    os::raw::{c_int, c_void},
     pin::Pin,
     thread,
 };
@@ -234,11 +235,17 @@ impl SrtBuilder {
         socket.connect(remote)?;
         Ok(SrtStream { socket })
     }
-    pub fn listen<A: ToSocketAddrs>(self, addr: A, backlog: i32) -> Result<SrtListener> {
+    pub fn listen<A: ToSocketAddrs>(
+        self,
+        addr: A,
+        backlog: i32,
+        callback: srt_listen_callback_fn,
+        callback_opaque: Option<*mut c_void>,
+    ) -> Result<SrtListener> {
         let socket = SrtSocket::new()?;
         self.config_socket(&socket)?;
         let socket = socket.bind(addr)?;
-        socket.listen(backlog)?;
+        socket.listen(backlog, callback, callback_opaque)?;
         Ok(SrtListener { socket })
     }
     pub fn rendezvous<A: ToSocketAddrs, B: ToSocketAddrs>(
@@ -811,11 +818,17 @@ impl SrtAsyncBuilder {
         socket.set_receive_blocking(false)?;
         Ok(ConnectFuture { socket })
     }
-    pub fn listen<A: ToSocketAddrs>(self, addr: A, backlog: i32) -> Result<SrtAsyncListener> {
+    pub fn listen<A: ToSocketAddrs>(
+        self,
+        addr: A,
+        backlog: i32,
+        callback: srt_listen_callback_fn,
+        callback_opaque: Option<*mut c_void>,
+    ) -> Result<SrtAsyncListener> {
         let socket = SrtSocket::new()?;
         self.config_socket(&socket)?;
         let socket = socket.bind(addr)?;
-        socket.listen(backlog)?; // Still synchronous
+        socket.listen(backlog, callback, callback_opaque)?; // Still synchronous
         Ok(SrtAsyncListener { socket })
     }
     //pub fn rendezvous<A: ToSocketAddrs, B: ToSocketAddrs>(
@@ -1197,7 +1210,7 @@ mod tests {
         thread::spawn(move || {
             let listen = srt::builder()
                 .set_file_transmission_type()
-                .listen("127.0.0.1:49049", 1)
+                .listen("127.0.0.1:49049", 1, None, None)
                 .expect("fail listen()");
             let local = listen.local_addr().expect("fail local_addr()");
             tx.send(local).expect("fail send through mpsc channel");
@@ -1227,7 +1240,7 @@ mod tests {
         let listen_task = async move {
             let listen = srt::async_builder()
                 .set_file_transmission_type()
-                .listen("127.0.0.1:0", 1)
+                .listen("127.0.0.1:0", 1, None, None)
                 .expect("fail listen()");
             let local = listen.local_addr().expect("fail local_addr()");
             tx.send(local).expect("fail send through mpsc channel");
