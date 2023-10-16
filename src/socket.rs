@@ -58,8 +58,8 @@ impl SrtSocket {
         }
     }
     pub fn bind<A: ToSocketAddrs>(self, addrs: A) -> Result<Self> {
-        if let Ok(addrs) = addrs.to_socket_addrs() {
-            for addr in addrs {
+        if let Ok(mut addrs) = addrs.to_socket_addrs() {
+            if let Some(addr) = addrs.next() {
                 match addr {
                     SocketAddr::V4(addr) => {
                         let sock_addr = create_sockaddr_in(addr);
@@ -158,7 +158,7 @@ impl SrtSocket {
                         mem::size_of::<sockaddr_in>() as c_int,
                     )
                 };
-                return error::handle_result((), result);
+                error::handle_result((), result)
             }
             SocketAddr::V6(target) => {
                 let id = unsafe { srt::srt_create_socket() };
@@ -170,7 +170,7 @@ impl SrtSocket {
                         mem::size_of::<sockaddr_in6>() as c_int,
                     )
                 };
-                return error::handle_result((), result);
+                error::handle_result((), result)
             }
         }
     }
@@ -452,7 +452,7 @@ impl SrtSocket {
                 &mut _optlen as *mut c_int,
             )
         };
-        error::handle_result(linger.l_linger as i32, result)
+        error::handle_result(linger.l_linger, result)
     }
     pub fn get_max_reorder_tolerance(&self) -> Result<i32> {
         let mut packets = 0;

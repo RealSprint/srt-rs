@@ -615,7 +615,7 @@ impl AsyncRead for SrtAsyncStream {
                     let mut epoll = Epoll::new()?;
                     epoll.add(&self.socket, &srt::SRT_EPOLL_OPT::SRT_EPOLL_IN)?;
                     thread::spawn(move || {
-                        if let Ok(_) = epoll.wait(-1) {
+                        if epoll.wait(-1).is_ok() {
                             waker.wake();
                         }
                     });
@@ -645,7 +645,7 @@ impl AsyncWrite for SrtAsyncStream {
                             let mut epoll = Epoll::new()?;
                             epoll.add(&self.socket, &srt::SRT_EPOLL_OPT::SRT_EPOLL_OUT)?;
                             thread::spawn(move || {
-                                if let Ok(_) = epoll.wait(-1) {
+                                if epoll.wait(-1).is_ok() {
                                     waker.wake();
                                 }
                             });
@@ -671,7 +671,7 @@ impl AsyncWrite for SrtAsyncStream {
                     let mut epoll = Epoll::new()?;
                     epoll.add(&self.socket, &srt::SRT_EPOLL_OPT::SRT_EPOLL_OUT)?;
                     thread::spawn(move || {
-                        if let Ok(_) = epoll.wait(-1) {
+                        if epoll.wait(-1).is_ok() {
                             waker.wake();
                         }
                     });
@@ -697,7 +697,7 @@ impl AsyncWrite for SrtAsyncStream {
                     let mut epoll = Epoll::new()?;
                     epoll.add(&self.socket, &srt::SRT_EPOLL_OPT::SRT_EPOLL_OUT)?;
                     thread::spawn(move || {
-                        if let Ok(_) = epoll.wait(-1) {
+                        if epoll.wait(-1).is_ok() {
                             waker.wake();
                         }
                     });
@@ -752,7 +752,7 @@ impl Future for AcceptFuture {
                     let mut epoll = Epoll::new()?;
                     epoll.add(&self.socket, &srt::SRT_EPOLL_OPT::SRT_EPOLL_IN)?;
                     thread::spawn(move || {
-                        if let Ok(_) = epoll.wait(-1) {
+                        if epoll.wait(-1).is_ok() {
                             waker.wake();
                         }
                     });
@@ -788,7 +788,7 @@ impl Future for ConnectFuture {
                             srt::SRT_EPOLL_OPT::SRT_EPOLL_OUT | srt::SRT_EPOLL_OPT::SRT_EPOLL_ERR;
                         epoll.add(&self.socket, &events)?;
                         thread::spawn(move || {
-                            if let Ok(_) = epoll.wait(-1) {
+                            if epoll.wait(-1).is_ok() {
                                 waker.wake();
                             }
                         });
