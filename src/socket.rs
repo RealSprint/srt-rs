@@ -3,13 +3,13 @@ use crate::srt::srt_listen_callback_fn;
 
 use error::SrtError;
 use libsrt_sys as srt;
-use srt::sockaddr;
+use srt::{sockaddr, SRT_TRACEBSTATS};
 
 use std::{
     convert::TryInto,
     ffi::c_void,
     iter::FromIterator,
-    mem,
+    mem::{self, MaybeUninit},
     net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, ToSocketAddrs},
     os::raw::{c_char, c_int},
 };
@@ -813,6 +813,21 @@ impl SrtSocket {
             )
         };
         error::handle_result(version, result)
+    }
+
+    pub fn get_bistats(&self, clear: bool, instantaneous: bool) -> Result<SRT_TRACEBSTATS> {
+        let mut stats: MaybeUninit<SRT_TRACEBSTATS> = MaybeUninit::uninit();
+        let result = unsafe {
+            srt::srt_bistats(
+                self.id,
+                stats.as_mut_ptr(),
+                clear as i32,
+                instantaneous as i32,
+            )
+        };
+        error::handle_result((), result)?;
+        let stats = unsafe { stats.assume_init() };
+        Ok(stats)
     }
 }
 //Post set flag methods
