@@ -10,6 +10,7 @@ use futures::{
     io::{AsyncRead, AsyncWrite},
     task::{Context, Poll},
 };
+use srt::SRT_TRACEBSTATS;
 
 use std::{
     convert::TryInto,
@@ -206,6 +207,9 @@ impl SrtStream {
     }
     pub fn get_srt_version(&self) -> Result<i32> {
         self.socket.get_srt_version()
+    }
+    pub fn get_bistats(&self, clear: bool, instantaneous: bool) -> Result<SRT_TRACEBSTATS> {
+        self.socket.get_bistats(clear, instantaneous)
     }
 }
 
@@ -598,6 +602,9 @@ impl SrtAsyncStream {
     }
     pub fn get_srt_version(&self) -> Result<i32> {
         self.socket.get_srt_version()
+    }
+    pub fn get_bistats(&self, clear: bool, instantaneous: bool) -> Result<SRT_TRACEBSTATS> {
+        self.socket.get_bistats(clear, instantaneous)
     }
 }
 
