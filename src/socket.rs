@@ -737,7 +737,7 @@ impl SrtSocket {
     }
     pub fn get_stream_id(&self) -> Result<String> {
         let mut id = String::from_iter([' '; 512].iter());
-        let mut id_len = mem::size_of_val(&id) as i32;
+        let mut id_len = id.len() as i32;
         let result = unsafe {
             srt::srt_getsockflag(
                 self.id,
