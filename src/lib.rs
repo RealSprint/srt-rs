@@ -483,7 +483,7 @@ pub struct SrtAsyncStream {
 
 impl SrtAsyncStream {
     pub fn new(socket: SrtSocket, epoll_opt: SRT_EPOLL_OPT) -> Result<Self> {
-        let mut epoll = Epoll::new().unwrap();
+        let mut epoll = Epoll::new()?;
         epoll.add(&socket, &epoll_opt)?;
 
         Ok(Self {
@@ -734,7 +734,7 @@ pub struct SrtAsyncListener {
 
 impl SrtAsyncListener {
     pub fn new(socket: SrtSocket) -> Result<Self> {
-        let mut epoll = Epoll::new().unwrap();
+        let mut epoll = Epoll::new()?;
         epoll.add(&socket, &srt::SRT_EPOLL_OPT::SRT_EPOLL_IN)?;
 
         Ok(Self {
