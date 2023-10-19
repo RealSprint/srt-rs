@@ -806,7 +806,6 @@ impl Future for ConnectFuture {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match self.socket.get_socket_state() {
             Ok(s) => match s {
-                // TODO: The epoll here is the wrong way
                 SrtSocketStatus::Connected => Poll::Ready(Ok(SrtAsyncStream::new(
                     self.socket,
                     srt::SRT_EPOLL_OPT::SRT_EPOLL_OUT,
