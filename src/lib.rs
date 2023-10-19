@@ -482,14 +482,14 @@ pub struct SrtAsyncStream {
 }
 
 impl SrtAsyncStream {
-    pub fn new(socket: SrtSocket, epoll_opt: SRT_EPOLL_OPT) -> Self {
+    pub fn new(socket: SrtSocket, epoll_opt: SRT_EPOLL_OPT) -> Result<Self> {
         let mut epoll = Epoll::new().unwrap();
-        epoll.add(&socket, &epoll_opt);
+        epoll.add(&socket, &epoll_opt)?;
 
-        Self {
+        Ok(Self {
             socket,
             epoll: Arc::new(epoll),
-        }
+        })
     }
     pub fn local_addr(&self) -> Result<SocketAddr> {
         self.socket.local_addr()
@@ -733,14 +733,14 @@ pub struct SrtAsyncListener {
 }
 
 impl SrtAsyncListener {
-    pub fn new(socket: SrtSocket) -> Self {
+    pub fn new(socket: SrtSocket) -> Result<Self> {
         let mut epoll = Epoll::new().unwrap();
-        epoll.add(&socket, &srt::SRT_EPOLL_OPT::SRT_EPOLL_IN);
+        epoll.add(&socket, &srt::SRT_EPOLL_OPT::SRT_EPOLL_IN)?;
 
-        Self {
+        Ok(Self {
             socket,
             epoll: Arc::new(epoll),
-        }
+        })
     }
     pub fn accept(&self) -> AcceptFuture {
         AcceptFuture {
@@ -774,7 +774,7 @@ impl Future for AcceptFuture {
                     Poll::Ready(Err(s_b.expect_err("unreachable")))
                 } else {
                     Poll::Ready(Ok((
-                        SrtAsyncStream::new(socket, srt::SRT_EPOLL_OPT::SRT_EPOLL_IN),
+                        SrtAsyncStream::new(socket, srt::SRT_EPOLL_OPT::SRT_EPOLL_IN)?,
                         addr,
                     )))
                 }
@@ -810,7 +810,7 @@ impl Future for ConnectFuture {
                 SrtSocketStatus::Connected => Poll::Ready(Ok(SrtAsyncStream::new(
                     self.socket,
                     srt::SRT_EPOLL_OPT::SRT_EPOLL_OUT,
-                ))),
+                )?)),
                 SrtSocketStatus::Broken => Poll::Ready(Err(SrtError::ConnLost)),
                 SrtSocketStatus::Init => Poll::Ready(Err(SrtError::UnboundSock)),
                 SrtSocketStatus::Opened => Poll::Ready(Err(SrtError::InvOp)),
@@ -866,7 +866,7 @@ impl SrtAsyncBuilder {
         let socket = socket.bind(addr)?;
         socket.listen(backlog, callback, callback_opaque)?; // Still synchronous
 
-        Ok(SrtAsyncListener::new(socket))
+        SrtAsyncListener::new(socket)
     }
     //pub fn rendezvous<A: ToSocketAddrs, B: ToSocketAddrs>(
     //    self,
