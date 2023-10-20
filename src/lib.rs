@@ -815,7 +815,6 @@ impl Future for ConnectFuture {
                 SrtSocketStatus::Opened => Poll::Ready(Err(SrtError::InvOp)),
                 SrtSocketStatus::Listening => Poll::Ready(Err(SrtError::InvOp)),
                 SrtSocketStatus::Connecting => match self.socket.get_reject_reason() {
-                    // TODO: Hmm
                     error::SrtRejectReason::Unknown => {
                         let waker = cx.waker().clone();
                         let mut epoll = Epoll::new()?;
