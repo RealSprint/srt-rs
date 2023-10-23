@@ -10,7 +10,7 @@ use futures::{
     io::{AsyncRead, AsyncWrite},
     task::{Context, Poll},
 };
-use srt::SRT_TRACEBSTATS;
+use srt::{SRT_EPOLL_OPT, SRT_TRACEBSTATS};
 
 use std::{
     convert::TryInto,
@@ -20,6 +20,7 @@ use std::{
     ops::Drop,
     os::raw::{c_int, c_void},
     pin::Pin,
+    sync::Arc,
     thread,
 };
 
@@ -477,9 +478,19 @@ impl SrtBuilder {
 
 pub struct SrtAsyncStream {
     socket: SrtSocket,
+    epoll: Arc<Epoll>,
 }
 
 impl SrtAsyncStream {
+    pub fn new(socket: SrtSocket, epoll_opt: SRT_EPOLL_OPT) -> Result<Self> {
+        let mut epoll = Epoll::new()?;
+        epoll.add(&socket, &epoll_opt)?;
+
+        Ok(Self {
+            socket,
+            epoll: Arc::new(epoll),
+        })
+    }
     pub fn local_addr(&self) -> Result<SocketAddr> {
         self.socket.local_addr()
     }
@@ -619,8 +630,8 @@ impl AsyncRead for SrtAsyncStream {
             Err(e) => match e {
                 SrtError::AsyncRcv => {
                     let waker = cx.waker().clone();
-                    let mut epoll = Epoll::new()?;
-                    epoll.add(&self.socket, &srt::SRT_EPOLL_OPT::SRT_EPOLL_IN)?;
+                    let epoll = self.epoll.clone();
+
                     thread::spawn(move || {
                         if epoll.wait(-1).is_ok() {
                             waker.wake();
@@ -649,8 +660,8 @@ impl AsyncWrite for SrtAsyncStream {
                             Poll::Ready(Ok(0))
                         } else {
                             let waker = cx.waker().clone();
-                            let mut epoll = Epoll::new()?;
-                            epoll.add(&self.socket, &srt::SRT_EPOLL_OPT::SRT_EPOLL_OUT)?;
+                            let epoll = self.epoll.clone();
+
                             thread::spawn(move || {
                                 if epoll.wait(-1).is_ok() {
                                     waker.wake();
@@ -675,8 +686,8 @@ impl AsyncWrite for SrtAsyncStream {
                     Poll::Ready(Ok(()))
                 } else {
                     let waker = cx.waker().clone();
-                    let mut epoll = Epoll::new()?;
-                    epoll.add(&self.socket, &srt::SRT_EPOLL_OPT::SRT_EPOLL_OUT)?;
+                    let epoll = self.epoll.clone();
+
                     thread::spawn(move || {
                         if epoll.wait(-1).is_ok() {
                             waker.wake();
@@ -701,8 +712,8 @@ impl AsyncWrite for SrtAsyncStream {
                     })
                 } else {
                     let waker = cx.waker().clone();
-                    let mut epoll = Epoll::new()?;
-                    epoll.add(&self.socket, &srt::SRT_EPOLL_OPT::SRT_EPOLL_OUT)?;
+                    let epoll = self.epoll.clone();
+
                     thread::spawn(move || {
                         if epoll.wait(-1).is_ok() {
                             waker.wake();
@@ -718,12 +729,23 @@ impl AsyncWrite for SrtAsyncStream {
 
 pub struct SrtAsyncListener {
     socket: SrtSocket,
+    epoll: Arc<Epoll>,
 }
 
 impl SrtAsyncListener {
+    pub fn new(socket: SrtSocket) -> Result<Self> {
+        let mut epoll = Epoll::new()?;
+        epoll.add(&socket, &srt::SRT_EPOLL_OPT::SRT_EPOLL_IN)?;
+
+        Ok(Self {
+            socket,
+            epoll: Arc::new(epoll),
+        })
+    }
     pub fn accept(&self) -> AcceptFuture {
         AcceptFuture {
             socket: self.socket,
+            epoll: self.epoll.clone(),
         }
     }
     pub fn close(self) -> Result<()> {
@@ -736,6 +758,7 @@ impl SrtAsyncListener {
 
 pub struct AcceptFuture {
     socket: SrtSocket,
+    epoll: Arc<Epoll>,
 }
 
 impl Future for AcceptFuture {
@@ -750,14 +773,17 @@ impl Future for AcceptFuture {
                 } else if s_b.is_err() {
                     Poll::Ready(Err(s_b.expect_err("unreachable")))
                 } else {
-                    Poll::Ready(Ok((SrtAsyncStream { socket }, addr)))
+                    Poll::Ready(Ok((
+                        SrtAsyncStream::new(socket, srt::SRT_EPOLL_OPT::SRT_EPOLL_IN)?,
+                        addr,
+                    )))
                 }
             }
             Err(e) => match e {
                 SrtError::AsyncRcv => {
                     let waker = cx.waker().clone();
-                    let mut epoll = Epoll::new()?;
-                    epoll.add(&self.socket, &srt::SRT_EPOLL_OPT::SRT_EPOLL_IN)?;
+                    let epoll = self.epoll.clone();
+
                     thread::spawn(move || {
                         if epoll.wait(-1).is_ok() {
                             waker.wake();
@@ -780,9 +806,10 @@ impl Future for ConnectFuture {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match self.socket.get_socket_state() {
             Ok(s) => match s {
-                SrtSocketStatus::Connected => Poll::Ready(Ok(SrtAsyncStream {
-                    socket: self.socket,
-                })),
+                SrtSocketStatus::Connected => Poll::Ready(Ok(SrtAsyncStream::new(
+                    self.socket,
+                    srt::SRT_EPOLL_OPT::SRT_EPOLL_OUT,
+                )?)),
                 SrtSocketStatus::Broken => Poll::Ready(Err(SrtError::ConnLost)),
                 SrtSocketStatus::Init => Poll::Ready(Err(SrtError::UnboundSock)),
                 SrtSocketStatus::Opened => Poll::Ready(Err(SrtError::InvOp)),
@@ -836,7 +863,8 @@ impl SrtAsyncBuilder {
         self.config_socket(&socket)?;
         let socket = socket.bind(addr)?;
         socket.listen(backlog, callback, callback_opaque)?; // Still synchronous
-        Ok(SrtAsyncListener { socket })
+
+        SrtAsyncListener::new(socket)
     }
     //pub fn rendezvous<A: ToSocketAddrs, B: ToSocketAddrs>(
     //    self,
