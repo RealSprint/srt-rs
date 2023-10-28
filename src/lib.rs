@@ -1268,11 +1268,12 @@ mod tests {
         assert!(connect.close().is_ok());
         srt::cleanup().expect("failed cleanup()");
     }
-    #[async_std::test]
+    #[tokio::test]
     async fn test_connect_accept_async() {
         let data = b"testing";
         srt::startup().expect("failed startup");
-        let (tx_connected, rx_connected) = mpsc::channel::<SocketAddr>();
+        let (tx_connected, mut rx_connected) = tokio::sync::mpsc::channel::<SocketAddr>(1);
+        let (tx_read_done, mut rx_read_done) = tokio::sync::mpsc::channel::<()>(1);
         let listen_task = async move {
             let listen = srt::async_builder()
                 .set_file_transmission_type()
@@ -1281,14 +1282,21 @@ mod tests {
             let local = listen.local_addr().expect("fail local_addr()");
             tx_connected
                 .send(local)
+                .await
                 .expect("fail send through mpsc channel");
             let (mut peer, _peer_addr) = listen.accept().await.expect("fail accep()");
             peer.write_all(data).await.expect("fail write()");
+            rx_read_done
+                .recv()
+                .await
+                .expect("fail recv through mpsc channel");
             assert!(listen.close().is_ok());
         };
         let connect_task = async move {
-            let addr = rx_connected.recv().expect("fail recv through mpsc channel");
-            println!("addr: {}", addr);
+            let addr = rx_connected
+                .recv()
+                .await
+                .expect("fail recv through mpsc channel");
             let mut connect = srt::async_builder()
                 .set_file_transmission_type()
                 .connect(addr)
@@ -1297,10 +1305,8 @@ mod tests {
                 .expect("fail connect");
             let mut buf = [0u8; 7];
             let _ = connect.read(&mut buf).await.expect("fail read()");
-            assert_eq!(
-                std::str::from_utf8(&buf).expect("malformed message"),
-                "testing"
-            );
+            let _ = tx_read_done.send(()).await;
+            assert_eq!(&buf, data);
             assert!(connect.close().await.is_ok());
         };
         future::join(listen_task, connect_task).await;
