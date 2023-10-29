@@ -20,8 +20,11 @@ use std::{
     ops::Drop,
     os::raw::{c_int, c_void},
     pin::Pin,
-    sync::Arc,
-    thread,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread::{self, JoinHandle},
 };
 
 pub use socket::{
@@ -746,6 +749,8 @@ impl SrtAsyncListener {
         AcceptFuture {
             socket: self.socket,
             epoll: self.epoll.clone(),
+            has_data: Arc::new(AtomicBool::new(false)),
+            waker_handle: None,
         }
     }
     pub fn close(self) -> Result<()> {
@@ -759,11 +764,43 @@ impl SrtAsyncListener {
 pub struct AcceptFuture {
     socket: SrtSocket,
     epoll: Arc<Epoll>,
+    has_data: Arc<AtomicBool>,
+    waker_handle: Option<JoinHandle<()>>,
 }
 
 impl Future for AcceptFuture {
     type Output = Result<(SrtAsyncStream, SocketAddr)>;
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if let Some(waker) = &self.waker_handle {
+            if waker.is_finished() {
+                self.waker_handle = None
+            }
+        };
+
+        // The [documentation](https://github.com/Haivision/srt/blob/master/docs/API/API-functions.md#srt_accept)
+        // explicitly states that `srt_accept` should not be called when there is no data to be read.
+        // So here we prevent the initial- and spurious wakeups from doing so.
+        let has_data = self.has_data.clone();
+        if !has_data.load(Ordering::Relaxed) {
+            if self.waker_handle.is_some() {
+                return Poll::Pending;
+            };
+
+            let waker = cx.waker().clone();
+            let epoll = self.epoll.clone();
+
+            let handle = thread::spawn(move || {
+                if epoll.wait(-1).is_ok() {
+                    has_data.store(true, Ordering::Relaxed);
+                    waker.wake();
+                }
+            });
+
+            self.waker_handle = Some(handle);
+
+            return Poll::Pending;
+        };
+
         match self.socket.accept() {
             Ok((socket, addr)) => {
                 let r_b = socket.set_receive_blocking(false);
@@ -779,20 +816,7 @@ impl Future for AcceptFuture {
                     )))
                 }
             }
-            Err(e) => match e {
-                SrtError::AsyncRcv => {
-                    let waker = cx.waker().clone();
-                    let epoll = self.epoll.clone();
-
-                    thread::spawn(move || {
-                        if epoll.wait(-1).is_ok() {
-                            waker.wake();
-                        }
-                    });
-                    Poll::Pending
-                }
-                e => Poll::Ready(Err(e)),
-            },
+            Err(e) => Poll::Ready(Err(e)),
         }
     }
 }
