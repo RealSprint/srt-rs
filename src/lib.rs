@@ -10,6 +10,7 @@ use futures::{
     io::{AsyncRead, AsyncWrite},
     task::{Context, Poll},
 };
+use parking_lot::{Condvar, Mutex};
 use srt::{SRT_EPOLL_OPT, SRT_TRACEBSTATS};
 
 use std::{
@@ -21,6 +22,7 @@ use std::{
     os::raw::{c_int, c_void},
     pin::Pin,
     sync::Arc,
+    task::Waker,
     thread,
 };
 
@@ -729,23 +731,37 @@ impl AsyncWrite for SrtAsyncStream {
 
 pub struct SrtAsyncListener {
     socket: SrtSocket,
-    epoll: Arc<Epoll>,
+    shared: Arc<Mutex<SrtAsyncAcceptShared>>,
+    condvar: Arc<Condvar>,
+}
+
+struct SrtAsyncAcceptShared {
+    has_data: bool,
+    waker: Option<Waker>,
 }
 
 impl SrtAsyncListener {
     pub fn new(socket: SrtSocket) -> Result<Self> {
-        let mut epoll = Epoll::new()?;
-        epoll.add(&socket, &srt::SRT_EPOLL_OPT::SRT_EPOLL_IN)?;
+        let shared = Arc::new(Mutex::new(SrtAsyncAcceptShared {
+            has_data: false,
+            waker: None,
+        }));
 
-        Ok(Self {
+        let s = Self {
             socket,
-            epoll: Arc::new(epoll),
-        })
+            shared,
+            condvar: Arc::new(Condvar::new()),
+        };
+
+        s.spawn_waker()?;
+
+        Ok(s)
     }
     pub fn accept(&self) -> AcceptFuture {
         AcceptFuture {
             socket: self.socket,
-            epoll: self.epoll.clone(),
+            shared: self.shared.clone(),
+            condvar: self.condvar.clone(),
         }
     }
     pub fn close(self) -> Result<()> {
@@ -754,17 +770,61 @@ impl SrtAsyncListener {
     pub fn local_addr(&self) -> Result<SocketAddr> {
         self.socket.local_addr()
     }
+
+    fn spawn_waker(&self) -> Result<()> {
+        let mut epoll = Epoll::new()?;
+        epoll.add(&self.socket, &srt::SRT_EPOLL_OPT::SRT_EPOLL_IN)?;
+
+        let shared = self.shared.clone();
+        let condvar = self.condvar.clone();
+
+        thread::spawn(move || {
+            while epoll.wait(-1).is_ok() {
+                let mut shared = shared.lock();
+
+                shared.has_data = true;
+                if let Some(waker) = shared.waker.take() {
+                    waker.wake();
+                }
+
+                // Avoid checking epoll status again until we've given the future a chance to
+                // fetch data.
+                condvar.wait(&mut shared);
+            }
+        });
+
+        Ok(())
+    }
 }
 
 pub struct AcceptFuture {
     socket: SrtSocket,
-    epoll: Arc<Epoll>,
+    shared: Arc<Mutex<SrtAsyncAcceptShared>>,
+    condvar: Arc<Condvar>,
 }
 
 impl Future for AcceptFuture {
     type Output = Result<(SrtAsyncStream, SocketAddr)>;
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.socket.accept() {
+        let mut shared = self.shared.lock();
+
+        // The [documentation](https://github.com/Haivision/srt/blob/master/docs/API/API-functions.md#srt_accept)
+        // explicitly states that `srt_accept` should not be called when there is no data to be read.
+        // So here we prevent the initial poll and spurious wakeups from doing so.
+        if !shared.has_data {
+            // Make sure to always wake the newest waker
+            // https://doc.rust-lang.org/std/future/trait.Future.html#tymethod.poll
+            shared.waker = Some(cx.waker().clone());
+
+            return Poll::Pending;
+        }
+
+        let res = self.socket.accept();
+        shared.has_data = false;
+        self.condvar.notify_one();
+        drop(shared);
+
+        match res {
             Ok((socket, addr)) => {
                 let r_b = socket.set_receive_blocking(false);
                 let s_b = socket.set_send_blocking(false);
@@ -779,20 +839,7 @@ impl Future for AcceptFuture {
                     )))
                 }
             }
-            Err(e) => match e {
-                SrtError::AsyncRcv => {
-                    let waker = cx.waker().clone();
-                    let epoll = self.epoll.clone();
-
-                    thread::spawn(move || {
-                        if epoll.wait(-1).is_ok() {
-                            waker.wake();
-                        }
-                    });
-                    Poll::Pending
-                }
-                e => Poll::Ready(Err(e)),
-            },
+            Err(e) => Poll::Ready(Err(e)),
         }
     }
 }
