@@ -1268,36 +1268,45 @@ mod tests {
         assert!(connect.close().is_ok());
         srt::cleanup().expect("failed cleanup()");
     }
-    #[async_std::test]
+    #[tokio::test]
     async fn test_connect_accept_async() {
+        let data = b"testing";
         srt::startup().expect("failed startup");
-        let (tx, rx) = mpsc::channel::<SocketAddr>();
+        let (tx_connected, mut rx_connected) = tokio::sync::mpsc::channel::<SocketAddr>(1);
+        let (tx_read_done, mut rx_read_done) = tokio::sync::mpsc::channel::<()>(1);
         let listen_task = async move {
             let listen = srt::async_builder()
                 .set_file_transmission_type()
                 .listen("127.0.0.1:0", 1, None, None)
                 .expect("fail listen()");
             let local = listen.local_addr().expect("fail local_addr()");
-            tx.send(local).expect("fail send through mpsc channel");
+            tx_connected
+                .send(local)
+                .await
+                .expect("fail send through mpsc channel");
             let (mut peer, _peer_addr) = listen.accept().await.expect("fail accep()");
-            peer.write_all(b"testing").await.expect("fail write()");
-            assert!(peer.close().await.is_ok());
+            peer.write_all(data).await.expect("fail write()");
+            rx_read_done
+                .recv()
+                .await
+                .expect("fail recv through mpsc channel");
             assert!(listen.close().is_ok());
         };
         let connect_task = async move {
-            let addr = rx.recv().expect("fail recv through mpsc channel");
+            let addr = rx_connected
+                .recv()
+                .await
+                .expect("fail recv through mpsc channel");
             let mut connect = srt::async_builder()
                 .set_file_transmission_type()
                 .connect(addr)
                 .expect("fail start connect")
                 .await
                 .expect("fail connect");
-            let mut buf = Vec::new();
-            connect.read_to_end(&mut buf).await.expect("fail read()");
-            assert_eq!(
-                std::str::from_utf8(&buf).expect("malformed message"),
-                "testing"
-            );
+            let mut buf = [0u8; 7];
+            let _ = connect.read(&mut buf).await.expect("fail read()");
+            let _ = tx_read_done.send(()).await;
+            assert_eq!(&buf, data);
             assert!(connect.close().await.is_ok());
         };
         future::join(listen_task, connect_task).await;

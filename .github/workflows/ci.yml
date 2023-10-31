@@ -1,0 +1,38 @@
+name: Check, Test and Build
+on:
+  push:
+
+jobs:
+  check:
+    name: Check & Test
+    runs-on: ubuntu-20.04
+    steps:
+      - name: Check out
+        uses: actions/checkout@v3
+        with:
+          submodules: 'true'
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+          components: rustfmt, clippy
+
+      - name: Set up cargo cache
+        uses: actions/cache@v3
+        continue-on-error: false
+        with:
+          path: |
+            target/
+          key: cargo-debug-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-debug-
+
+      - name: Lint
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy -- -D warnings
+
+      - name: Test
+        run: cargo test
