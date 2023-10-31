@@ -14,11 +14,7 @@ readme = "README.md"
 libsrt-sys = { path = "libsrt-sys", version = "1.4.13" }
 libc = "0.2"
 futures = "0.3"
-
-
-[dev-dependencies]
 tokio = { version = "1.33.0", features = ["full"] }
-
 
 [target.'cfg(windows)'.dependencies]
 winapi = {version = "0.3", features = ["winsock2", "ws2def", "ws2ipdef", "inaddr", "in6addr"] }

@@ -11,6 +11,7 @@ use futures::{
     task::{Context, Poll},
 };
 use srt::{SRT_EPOLL_OPT, SRT_TRACEBSTATS};
+use tokio::task::JoinHandle;
 
 use std::{
     convert::TryInto,
@@ -20,7 +21,10 @@ use std::{
     ops::Drop,
     os::raw::{c_int, c_void},
     pin::Pin,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     thread,
 };
 
@@ -746,6 +750,8 @@ impl SrtAsyncListener {
         AcceptFuture {
             socket: self.socket,
             epoll: self.epoll.clone(),
+            handle: None,
+            has_data: Arc::new(AtomicBool::new(false)),
         }
     }
     pub fn close(self) -> Result<()> {
@@ -759,11 +765,42 @@ impl SrtAsyncListener {
 pub struct AcceptFuture {
     socket: SrtSocket,
     epoll: Arc<Epoll>,
+    handle: Option<JoinHandle<()>>,
+    has_data: Arc<AtomicBool>,
 }
 
 impl Future for AcceptFuture {
     type Output = Result<(SrtAsyncStream, SocketAddr)>;
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // According to https://doc.rust-lang.org/std/future/trait.Future.html#tymethod.poll
+        // only the Waker from the Context passed to the most recent call should be scheduled to receive a wakeup.
+        // So here we abort the previous task if it's still running.
+        if let Some(handle) = self.handle.take() {
+            if !handle.is_finished() {
+                handle.abort()
+            }
+        }
+
+        // The [documentation](https://github.com/Haivision/srt/blob/master/docs/API/API-functions.md#srt_accept)
+        // explicitly states that `srt_accept` should not be called when there is no data to be read.
+        // So here we prevent the initial- and spurious wakeups from doing so.
+        let has_data = self.has_data.clone();
+
+        if !has_data.load(Ordering::Relaxed) {
+            let waker = cx.waker().clone();
+            let epoll = self.epoll.clone();
+
+            let handle = tokio::task::spawn_blocking(move || {
+                if epoll.wait(-1).is_ok() {
+                    has_data.store(true, Ordering::Relaxed);
+                    waker.wake();
+                }
+            });
+
+            self.handle = Some(handle);
+            return Poll::Pending;
+        }
+
         match self.socket.accept() {
             Ok((socket, addr)) => {
                 let r_b = socket.set_receive_blocking(false);
@@ -781,14 +818,7 @@ impl Future for AcceptFuture {
             }
             Err(e) => match e {
                 SrtError::AsyncRcv => {
-                    let waker = cx.waker().clone();
-                    let epoll = self.epoll.clone();
-
-                    thread::spawn(move || {
-                        if epoll.wait(-1).is_ok() {
-                            waker.wake();
-                        }
-                    });
+                    // This path shouldn't be taken, but just in case we'll handle it
                     Poll::Pending
                 }
                 e => Poll::Ready(Err(e)),
