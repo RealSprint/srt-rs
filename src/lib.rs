@@ -634,7 +634,7 @@ impl AsyncRead for SrtAsyncStream {
                     let waker = cx.waker().clone();
                     let epoll = self.epoll.clone();
 
-                    thread::spawn(move || {
+                    tokio::task::spawn_blocking(move || {
                         if epoll.wait(-1).is_ok() {
                             waker.wake();
                         }
@@ -664,7 +664,7 @@ impl AsyncWrite for SrtAsyncStream {
                             let waker = cx.waker().clone();
                             let epoll = self.epoll.clone();
 
-                            thread::spawn(move || {
+                            tokio::task::spawn_blocking(move || {
                                 if epoll.wait(-1).is_ok() {
                                     waker.wake();
                                 }
@@ -690,7 +690,7 @@ impl AsyncWrite for SrtAsyncStream {
                     let waker = cx.waker().clone();
                     let epoll = self.epoll.clone();
 
-                    thread::spawn(move || {
+                    tokio::task::spawn_blocking(move || {
                         if epoll.wait(-1).is_ok() {
                             waker.wake();
                         }
@@ -716,7 +716,7 @@ impl AsyncWrite for SrtAsyncStream {
                     let waker = cx.waker().clone();
                     let epoll = self.epoll.clone();
 
-                    thread::spawn(move || {
+                    tokio::task::spawn_blocking(move || {
                         if epoll.wait(-1).is_ok() {
                             waker.wake();
                         }
@@ -868,7 +868,7 @@ impl Future for ConnectFuture {
                         let events =
                             srt::SRT_EPOLL_OPT::SRT_EPOLL_OUT | srt::SRT_EPOLL_OPT::SRT_EPOLL_ERR;
                         epoll.add(&self.socket, &events)?;
-                        thread::spawn(move || {
+                        tokio::task::spawn_blocking(move || {
                             if epoll.wait(-1).is_ok() {
                                 waker.wake();
                             }
