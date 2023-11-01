@@ -15,9 +15,6 @@ libsrt-sys = { path = "libsrt-sys", version = "1.4.13" }
 libc = "0.2"
 futures = "0.3"
 parking_lot = "0.12.1"
-
-
-[dev-dependencies]
 tokio = { version = "1.33.0", features = ["full"] }
 
 
