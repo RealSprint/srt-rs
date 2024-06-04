@@ -1458,6 +1458,7 @@ mod tests {
     }
     #[test]
     fn test_ipv4_connect_accept_async() {
+        let data = b"testing";
         srt::startup().expect("failed startup");
         let (tx_connected, mut rx_connected) = tokio::sync::mpsc::channel::<SocketAddr>(1);
         let (tx_read_done, mut rx_read_done) = tokio::sync::mpsc::channel::<()>(1);
