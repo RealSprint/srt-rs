@@ -19,3 +19,7 @@ os_socketaddr = { version = "0.2.5" }
 
 [target.'cfg(windows)'.dependencies]
 winapi = {version = "0.3", features = ["winsock2"] }
+
+[dev-dependencies]
+serial_test = "3.1.1"
+

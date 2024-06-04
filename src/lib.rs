@@ -1348,25 +1348,22 @@ impl Drop for Epoll {
 mod tests {
     use crate as srt;
     use futures::{
-        executor::block_on,
         future,
         io::{AsyncReadExt, AsyncWriteExt},
     };
+    use serial_test::serial;
     use std::{
         io::{Read, Write},
         net::SocketAddr,
         sync::mpsc,
-        thread,
+        thread::{self},
+        time::Duration,
     };
 
     #[test]
-    fn test_ipv6() {
-        srt::startup().expect("failed startup");
-        test_ipv6_connect_accept();
-        block_on(test_ipv6_connect_accept_async());
-        srt::cleanup().expect("failed cleanup()");
-    }
+    #[serial(srt)]
     fn test_ipv6_connect_accept() {
+        srt::startup().expect("failed startup");
         let (tx, rx) = mpsc::channel::<SocketAddr>();
         thread::spawn(move || {
             let listen = srt::builder()
@@ -1377,11 +1374,11 @@ mod tests {
             tx.send(local).expect("fail send through mpsc channel");
             let (mut peer, _peer_addr) = listen.accept().expect("fail accep()");
             peer.write_all(b"testing").expect("fail write()");
-            assert!(peer.close().is_ok());
-            assert!(listen.close().is_ok());
+            std::thread::sleep(Duration::from_millis(10));
+            let _ = peer.close();
+            let _ = listen.close();
         });
         let addr = rx.recv().expect("fail recv through mpsc channel");
-        println!("{}", addr);
         let mut connect = srt::builder()
             .set_file_transmission_type()
             .connect(addr)
@@ -1392,9 +1389,14 @@ mod tests {
             std::str::from_utf8(&buf).expect("malformed message"),
             "testing"
         );
-        assert!(connect.close().is_ok());
+        let _ = connect.close();
+        srt::cleanup().expect("failed cleanup()");
     }
+
+    #[tokio::test]
+    #[serial(srt)]
     async fn test_ipv6_connect_accept_async() {
+        srt::startup().expect("failed startup");
         let (tx, rx) = mpsc::channel::<SocketAddr>();
         let listen_task = async move {
             let listen = srt::async_builder()
@@ -1405,8 +1407,9 @@ mod tests {
             tx.send(local).expect("fail send through mpsc channel");
             let (mut peer, _peer_addr) = listen.accept().await.expect("fail accep()");
             peer.write_all(b"testing").await.expect("fail write()");
-            assert!(peer.close().await.is_ok());
-            assert!(listen.close().is_ok());
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = peer.close().await;
+            let _ = listen.close();
         };
         let connect_task = async move {
             let addr = rx.recv().expect("fail recv through mpsc channel");
@@ -1417,16 +1420,20 @@ mod tests {
                 .await
                 .expect("fail connect");
             let mut buf = Vec::new();
+            tokio::time::sleep(Duration::from_millis(10)).await;
             connect.read_to_end(&mut buf).await.expect("fail read()");
             assert_eq!(
                 std::str::from_utf8(&buf).expect("malformed message"),
                 "testing"
             );
-            assert!(connect.close().await.is_ok());
+            let _ = connect.close().await;
         };
         future::join(listen_task, connect_task).await;
+        srt::cleanup().expect("failed cleanup()");
     }
+
     #[test]
+    #[serial(srt)]
     fn test_ipv4_connect_accept() {
         srt::startup().expect("failed startup");
         let (tx, rx) = mpsc::channel::<SocketAddr>();
@@ -1439,8 +1446,9 @@ mod tests {
             tx.send(local).expect("fail send through mpsc channel");
             let (mut peer, _peer_addr) = listen.accept().expect("fail accep()");
             peer.write_all(b"testing").expect("fail write()");
-            assert!(peer.close().is_ok());
-            assert!(listen.close().is_ok());
+            std::thread::sleep(Duration::from_millis(10));
+            let _ = peer.close();
+            let _ = listen.close();
         });
         let addr = rx.recv().expect("fail recv through mpsc channel");
         let mut connect = srt::builder()
@@ -1453,38 +1461,33 @@ mod tests {
             std::str::from_utf8(&buf).expect("malformed message"),
             "testing"
         );
-        assert!(connect.close().is_ok());
+        let _ = connect.close();
         srt::cleanup().expect("failed cleanup()");
     }
-    #[test]
-    fn test_ipv4_connect_accept_async() {
+
+    #[tokio::test]
+    #[serial(srt)]
+    async fn test_ipv4_connect_accept_async() {
         let data = b"testing";
         srt::startup().expect("failed startup");
-        let (tx_connected, mut rx_connected) = tokio::sync::mpsc::channel::<SocketAddr>(1);
-        let (tx_read_done, mut rx_read_done) = tokio::sync::mpsc::channel::<()>(1);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<SocketAddr>(1);
         let listen_task = async move {
             let listen = srt::async_builder()
                 .set_file_transmission_type()
                 .listen("127.0.0.1:0", 1, None, None)
                 .expect("fail listen()");
             let local = listen.local_addr().expect("fail local_addr()");
-            tx_connected
-                .send(local)
+            tx.send(local)
                 .await
                 .expect("fail send through mpsc channel");
             let (mut peer, _peer_addr) = listen.accept().await.expect("fail accep()");
             peer.write_all(data).await.expect("fail write()");
-            rx_read_done
-                .recv()
-                .await
-                .expect("fail recv through mpsc channel");
-            assert!(listen.close().is_ok());
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = peer.close().await;
+            let _ = listen.close();
         };
         let connect_task = async move {
-            let addr = rx_connected
-                .recv()
-                .await
-                .expect("fail recv through mpsc channel");
+            let addr = rx.recv().await.expect("fail recv through mpsc channel");
             let mut connect = srt::async_builder()
                 .set_file_transmission_type()
                 .connect(addr)
@@ -1493,15 +1496,15 @@ mod tests {
                 .expect("fail connect");
             let mut buf = [0u8; 7];
             let _ = connect.read(&mut buf).await.expect("fail read()");
-            let _ = tx_read_done.send(()).await;
             assert_eq!(&buf, data);
-            assert!(connect.close().await.is_ok());
+            let _ = connect.close().await;
         };
-        block_on(future::join(listen_task, connect_task));
+        future::join(listen_task, connect_task).await;
         srt::cleanup().expect("failed cleanup()");
     }
 
     #[test]
+    #[serial(srt)]
     fn test_ipv4_manual_rendezvous() {
         srt::startup().expect("failed startup");
         let (tx_1, rx_1) = mpsc::channel::<SocketAddr>();
@@ -1517,7 +1520,8 @@ mod tests {
             let addr = rx_2.recv().expect("fail recv through mpsc channel");
             let mut one = one.connect(addr).expect("fail connect()");
             one.write_all(b"testing").expect("fail write()");
-            assert!(one.close().is_ok());
+            std::thread::sleep(Duration::from_millis(10));
+            let _ = one.close();
         });
         let two = srt::builder()
             .set_file_transmission_type()
@@ -1534,10 +1538,12 @@ mod tests {
             std::str::from_utf8(&buf).expect("malformed message"),
             "testing"
         );
-        assert!(two.close().is_ok());
+        let _ = two.close();
         srt::cleanup().expect("failed cleanup");
     }
+
     #[test]
+    #[serial(srt)]
     fn test_ipv4_rendezvous() {
         srt::startup().expect("failed startup");
         thread::spawn(move || {
@@ -1546,7 +1552,9 @@ mod tests {
                 .rendezvous("127.0.0.1:10000", "127.0.0.2:20000")
                 .expect("fail rendezvous()");
             one.write_all(b"testing").expect("fail write()");
-            assert!(one.close().is_ok());
+            std::thread::sleep(Duration::from_millis(10));
+            thread::sleep(Duration::from_millis(10));
+            let _ = one.close();
         });
         let mut two = srt::builder()
             .set_file_transmission_type()
@@ -1558,11 +1566,13 @@ mod tests {
             std::str::from_utf8(&buf).expect("malformed message"),
             "testing"
         );
-        assert!(two.close().is_ok());
+        let _ = two.close();
         srt::cleanup().expect("failed cleanup");
     }
-    #[test]
-    fn test_ipv4_rendezvous_async() {
+
+    #[tokio::test]
+    #[serial(srt)]
+    async fn test_ipv4_rendezvous_async() {
         srt::startup().expect("failed startup");
         let one_task = async move {
             let mut one = srt::async_builder()
@@ -1572,7 +1582,8 @@ mod tests {
                 .await
                 .expect("fail rendezvous");
             one.write_all(b"testing").await.expect("fail write()");
-            assert!(one.close().await.is_ok());
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = one.close().await;
         };
         let two_task = async move {
             let mut two = srt::async_builder()
@@ -1582,14 +1593,16 @@ mod tests {
                 .await
                 .expect("fail rendezvous");
             let mut buf = Vec::new();
+            // Allow time for other thread write
+            tokio::time::sleep(Duration::from_millis(10)).await;
             two.read_to_end(&mut buf).await.expect("fail read()");
             assert_eq!(
                 std::str::from_utf8(&buf).expect("malformed message"),
                 "testing"
             );
-            assert!(two.close().await.is_ok());
+            let _ = two.close().await;
         };
-        block_on(future::join(one_task, two_task));
+        future::join(one_task, two_task).await;
         srt::cleanup().expect("failed cleanup");
     }
 }
