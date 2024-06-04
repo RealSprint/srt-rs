@@ -15,7 +15,7 @@ libc = "0.2"
 futures = "0.3"
 parking_lot = "0.12.1"
 tokio = { version = "1.33.0", features = ["full"] }
-os_socketaddr = { git = "https://github.com/nthieu173/os_socketaddr.git", branch = "kozuka-add_support_windows" }
+os_socketaddr = { version = "0.2.5" }
 
 [target.'cfg(windows)'.dependencies]
 winapi = {version = "0.3", features = ["winsock2"] }
