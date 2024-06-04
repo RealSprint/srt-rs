@@ -1,6 +1,6 @@
 [package]
 name = "srt-rs"
-version = "0.2.3"
+version = "0.2.4"
 authors = ["Hieu Nguyen <nthieu173@gmail.com>"]
 edition = "2018"
 license = "MPL-2.0"
@@ -9,14 +9,13 @@ repository = "https://github.com/nthieu173/srt-rs"
 readme = "README.md"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
 libsrt-sys = { path = "libsrt-sys", version = "1.4.13" }
 libc = "0.2"
 futures = "0.3"
 parking_lot = "0.12.1"
 tokio = { version = "1.33.0", features = ["full"] }
-
+os_socketaddr = { git = "https://github.com/nthieu173/os_socketaddr.git", branch = "kozuka-add_support_windows" }
 
 [target.'cfg(windows)'.dependencies]
-winapi = {version = "0.3", features = ["winsock2", "ws2def", "ws2ipdef", "inaddr", "in6addr"] }
+winapi = {version = "0.3", features = ["winsock2"] }
