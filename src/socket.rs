@@ -53,8 +53,8 @@ impl SrtSocket {
         }
     }
     pub fn bind<A: ToSocketAddrs>(self, addrs: A) -> Result<Self> {
-        if let Ok(addrs) = addrs.to_socket_addrs() {
-            for addr in addrs {
+        if let Ok(mut addrs) = addrs.to_socket_addrs() {
+            if let Some(addr) = addrs.next() {
                 let os_addr: OsSocketAddr = addr.into();
                 let result = unsafe {
                     srt::srt_bind(
@@ -118,7 +118,7 @@ impl SrtSocket {
                 os_target.len() as i32,
             )
         };
-        return error::handle_result((), result);
+        error::handle_result((), result)
     }
     pub fn listen(
         &self,
