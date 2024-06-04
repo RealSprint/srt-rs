@@ -76,7 +76,7 @@ impl SrtListener {
 
 impl Drop for SrtListener {
     fn drop(&mut self) {
-        if let Err(_) = self.socket.close() {}
+        let _ = self.socket.close().is_err();
     }
 }
 
@@ -239,7 +239,7 @@ impl Write for SrtStream {
 
 impl Drop for SrtStream {
     fn drop(&mut self) {
-        if let Err(_) = self.socket.close() {}
+        let _ = self.socket.close();
     }
 }
 
@@ -766,7 +766,7 @@ impl AsyncWrite for SrtAsyncStream {
 
 impl Drop for SrtAsyncStream {
     fn drop(&mut self) {
-        if let Err(_) = self.socket.close() {}
+        let _ = self.socket.close();
     }
 }
 
@@ -840,7 +840,7 @@ impl SrtAsyncListener {
 
 impl Drop for SrtAsyncListener {
     fn drop(&mut self) {
-        if let Err(_) = self.socket.close() {}
+        let _ = self.socket.close();
     }
 }
 
