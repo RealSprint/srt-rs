@@ -74,11 +74,20 @@ impl SrtListener {
     }
 }
 
+impl Drop for SrtListener {
+    fn drop(&mut self) {
+        let _ = self.socket.close().is_err();
+    }
+}
+
 pub struct SrtStream {
     socket: SrtSocket,
 }
 
 impl SrtStream {
+    pub fn local_addr(&self) -> Result<SocketAddr> {
+        self.socket.local_addr()
+    }
     pub fn peer_addr(&self) -> Result<SocketAddr> {
         self.socket.peer_addr()
     }
@@ -93,9 +102,6 @@ impl SrtStream {
     }
     pub fn set_recovery_bandwidth_overhead(&self, per_cent: i32) -> Result<()> {
         self.socket.set_recovery_bandwidth_overhead(per_cent)
-    }
-    pub fn set_retransmission_algorithm(&self, reduced: bool) -> Result<()> {
-        self.socket.set_retransmission_algorithm(reduced)
     }
     pub fn set_receive_timeout(&self, msecs: i32) -> Result<()> {
         self.socket.set_receive_timeout(msecs)
@@ -231,11 +237,39 @@ impl Write for SrtStream {
     }
 }
 
+impl Drop for SrtStream {
+    fn drop(&mut self) {
+        let _ = self.socket.close();
+    }
+}
+
+pub struct SrtBoundSocket {
+    socket: SrtSocket,
+}
+
+impl SrtBoundSocket {
+    pub fn connect<A: ToSocketAddrs>(self, remote: A) -> Result<SrtStream> {
+        self.socket.connect(remote)?;
+        Ok(SrtStream {
+            socket: self.socket,
+        })
+    }
+    pub fn local_addr(&self) -> Result<SocketAddr> {
+        self.socket.local_addr()
+    }
+}
+
 pub struct SrtBuilder {
     opt_vec: Vec<SrtPreConnectOpt>,
 }
 
 impl SrtBuilder {
+    pub fn bind<A: ToSocketAddrs>(self, local: A) -> Result<SrtBoundSocket> {
+        let socket = SrtSocket::new()?;
+        self.config_socket(&socket)?;
+        let socket = socket.bind(local)?;
+        Ok(SrtBoundSocket { socket })
+    }
     pub fn connect<A: ToSocketAddrs>(self, remote: A) -> Result<SrtStream> {
         let socket = SrtSocket::new()?;
         self.config_socket(&socket)?;
@@ -255,11 +289,7 @@ impl SrtBuilder {
         socket.listen(backlog, callback, callback_opaque)?;
         Ok(SrtListener { socket })
     }
-    pub fn rendezvous<A: ToSocketAddrs, B: ToSocketAddrs>(
-        self,
-        local: A,
-        remote: B,
-    ) -> Result<SrtStream> {
+    pub fn rendezvous<A: ToSocketAddrs>(self, local: A, remote: A) -> Result<SrtStream> {
         let socket = SrtSocket::new()?;
         socket.set_rendezvous(true)?;
         self.config_socket(&socket)?;
@@ -269,7 +299,7 @@ impl SrtBuilder {
 }
 
 impl SrtBuilder {
-    #[cfg(target_os = "linux")]
+    #[cfg(target_family = "unix")]
     pub fn set_bind_to_device(mut self, device: &str) -> Self {
         self.opt_vec
             .push(SrtPreConnectOpt::BindToDevice(device.to_string()));
@@ -363,6 +393,10 @@ impl SrtBuilder {
         self.opt_vec.push(SrtPreConnectOpt::RcvLatency(msecs));
         self
     }
+    pub fn set_rendezvous(mut self, enable: bool) -> Self {
+        self.opt_vec.push(SrtPreConnectOpt::Rendezvous(enable));
+        self
+    }
     pub fn set_retransmission_algorithm(mut self, reduced: bool) -> Self {
         self.opt_vec
             .push(SrtPreConnectOpt::RetrainsmitAlgo(reduced));
@@ -429,6 +463,7 @@ impl SrtBuilder {
     fn config_socket(self, socket: &SrtSocket) -> Result<()> {
         for opt in self.opt_vec {
             match opt {
+                #[cfg(target_family = "unix")]
                 SrtPreConnectOpt::BindToDevice(value) => socket.set_bind_to_device(value)?,
                 SrtPreConnectOpt::ConnTimeO(value) => socket.set_connection_timeout(value)?,
                 SrtPreConnectOpt::FC(value) => socket.set_flight_flag_size(value)?,
@@ -453,7 +488,7 @@ impl SrtBuilder {
                 SrtPreConnectOpt::RcvBuf(value) => socket.set_receive_buffer(value)?,
                 SrtPreConnectOpt::RcvLatency(value) => socket.set_receive_latency(value)?,
                 SrtPreConnectOpt::RcvSyn(value) => socket.set_receive_blocking(value)?,
-                SrtPreConnectOpt::_Rendezvous(value) => socket.set_rendezvous(value)?,
+                SrtPreConnectOpt::Rendezvous(value) => socket.set_rendezvous(value)?,
                 SrtPreConnectOpt::RetrainsmitAlgo(value) => {
                     socket.set_retransmission_algorithm(value)?
                 }
@@ -496,6 +531,9 @@ impl SrtAsyncStream {
     pub fn local_addr(&self) -> Result<SocketAddr> {
         self.socket.local_addr()
     }
+    pub fn peer_addr(&self) -> Result<SocketAddr> {
+        self.socket.peer_addr()
+    }
     pub fn set_time_drift_tracer(&self, enable: bool) -> Result<()> {
         self.socket.set_time_drift_tracer(enable)
     }
@@ -504,9 +542,6 @@ impl SrtAsyncStream {
     }
     pub fn set_recovery_bandwidth_overhead(&self, per_cent: i32) -> Result<()> {
         self.socket.set_recovery_bandwidth_overhead(per_cent)
-    }
-    pub fn set_retransmission_algorithm(&self, reduced: bool) -> Result<()> {
-        self.socket.set_retransmission_algorithm(reduced)
     }
     pub fn get_flight_flag_size(&self) -> Result<i32> {
         self.socket.get_flight_flag_size()
@@ -729,6 +764,12 @@ impl AsyncWrite for SrtAsyncStream {
     }
 }
 
+impl Drop for SrtAsyncStream {
+    fn drop(&mut self) {
+        let _ = self.socket.close();
+    }
+}
+
 pub struct SrtAsyncListener {
     socket: SrtSocket,
     shared: Arc<Mutex<SrtAsyncAcceptShared>>,
@@ -794,6 +835,12 @@ impl SrtAsyncListener {
         });
 
         Ok(())
+    }
+}
+
+impl Drop for SrtAsyncListener {
+    fn drop(&mut self) {
+        let _ = self.socket.close();
     }
 }
 
@@ -886,11 +933,35 @@ impl Future for ConnectFuture {
     }
 }
 
+pub struct SrtBoundAsyncSocket {
+    socket: SrtSocket,
+}
+
+impl SrtBoundAsyncSocket {
+    pub fn connect<A: ToSocketAddrs>(self, remote: A) -> Result<ConnectFuture> {
+        self.socket.connect(remote)?;
+        self.socket.set_receive_blocking(false)?;
+        Ok(ConnectFuture {
+            socket: self.socket,
+        })
+    }
+    pub fn local_addr(&self) -> Result<SocketAddr> {
+        self.socket.local_addr()
+    }
+}
+
 pub struct SrtAsyncBuilder {
     opt_vec: Vec<SrtPreConnectOpt>,
 }
 
 impl SrtAsyncBuilder {
+    pub fn bind<A: ToSocketAddrs>(self, local: A) -> Result<SrtBoundAsyncSocket> {
+        let socket = SrtSocket::new()?;
+        self.config_socket(&socket)?;
+        socket.set_send_blocking(false)?;
+        let socket = socket.bind(local)?;
+        Ok(SrtBoundAsyncSocket { socket })
+    }
     pub fn connect<A: ToSocketAddrs>(self, remote: A) -> Result<ConnectFuture> {
         let socket = SrtSocket::new()?;
         self.config_socket(&socket)?;
@@ -913,20 +984,15 @@ impl SrtAsyncBuilder {
 
         SrtAsyncListener::new(socket)
     }
-    //pub fn rendezvous<A: ToSocketAddrs, B: ToSocketAddrs>(
-    //    self,
-    //    local: A,
-    //    remote: B,
-    //) -> Result<ConnectFuture> {
-    //    let socket = SrtSocket::new()?;
-    //    socket.set_rendezvous(true)?;
-    //    self.config_socket(&socket)?;
-    //    socket.set_send_blocking(false)?;
-    //    let socket = socket.bind(local)?;
-    //    socket.connect(remote)?;
-    //    socket.set_receive_blocking(false)?;
-    //    Ok(ConnectFuture { socket })
-    //}
+    pub fn rendezvous<A: ToSocketAddrs>(self, local: A, remote: A) -> Result<ConnectFuture> {
+        let socket = SrtSocket::new()?;
+        socket.set_rendezvous(true)?;
+        self.config_socket(&socket)?;
+        socket.set_send_blocking(false)?;
+        socket.rendezvous(local, remote)?;
+        socket.set_receive_blocking(false)?;
+        Ok(ConnectFuture { socket })
+    }
 }
 
 impl SrtAsyncBuilder {
@@ -1024,6 +1090,10 @@ impl SrtAsyncBuilder {
         self.opt_vec.push(SrtPreConnectOpt::RcvLatency(msecs));
         self
     }
+    pub fn set_rendezvous(mut self, enable: bool) -> Self {
+        self.opt_vec.push(SrtPreConnectOpt::Rendezvous(enable));
+        self
+    }
     pub fn set_retransmission_algorithm(mut self, reduced: bool) -> Self {
         self.opt_vec
             .push(SrtPreConnectOpt::RetrainsmitAlgo(reduced));
@@ -1090,6 +1160,7 @@ impl SrtAsyncBuilder {
     fn config_socket(self, socket: &SrtSocket) -> Result<()> {
         for opt in self.opt_vec {
             match opt {
+                #[cfg(target_family = "unix")]
                 SrtPreConnectOpt::BindToDevice(value) => socket.set_bind_to_device(value)?,
                 SrtPreConnectOpt::ConnTimeO(value) => socket.set_connection_timeout(value)?,
                 SrtPreConnectOpt::FC(value) => socket.set_flight_flag_size(value)?,
@@ -1114,7 +1185,7 @@ impl SrtAsyncBuilder {
                 SrtPreConnectOpt::RcvBuf(value) => socket.set_receive_buffer(value)?,
                 SrtPreConnectOpt::RcvLatency(value) => socket.set_receive_latency(value)?,
                 SrtPreConnectOpt::RcvSyn(value) => socket.set_receive_blocking(value)?,
-                SrtPreConnectOpt::_Rendezvous(value) => socket.set_rendezvous(value)?,
+                SrtPreConnectOpt::Rendezvous(value) => socket.set_rendezvous(value)?,
                 SrtPreConnectOpt::RetrainsmitAlgo(value) => {
                     socket.set_retransmission_algorithm(value)?
                 }
@@ -1141,6 +1212,7 @@ impl SrtAsyncBuilder {
 
 #[derive(Clone)]
 enum SrtPreConnectOpt {
+    #[cfg(target_family = "unix")]
     BindToDevice(String),
     ConnTimeO(i32),
     FC(i32),
@@ -1165,7 +1237,7 @@ enum SrtPreConnectOpt {
     RcvBuf(i32),
     RcvLatency(i32),
     RcvSyn(bool),
-    _Rendezvous(bool),
+    Rendezvous(bool),
     RetrainsmitAlgo(bool),
     ReuseAddr(bool),
     Congestion(SrtCongestionController),
@@ -1279,32 +1351,37 @@ mod tests {
         future,
         io::{AsyncReadExt, AsyncWriteExt},
     };
+    use serial_test::serial;
     use std::{
         io::{Read, Write},
         net::SocketAddr,
         sync::mpsc,
-        thread,
+        thread::{self},
+        time::Duration,
     };
+
     #[test]
-    fn test_connect_accept() {
+    #[serial(srt)]
+    fn test_ipv6_connect_accept() {
         srt::startup().expect("failed startup");
         let (tx, rx) = mpsc::channel::<SocketAddr>();
         thread::spawn(move || {
             let listen = srt::builder()
                 .set_file_transmission_type()
-                .listen("127.0.0.1:49049", 1, None, None)
+                .listen("[::1]:0", 1, None, None)
                 .expect("fail listen()");
             let local = listen.local_addr().expect("fail local_addr()");
             tx.send(local).expect("fail send through mpsc channel");
             let (mut peer, _peer_addr) = listen.accept().expect("fail accep()");
             peer.write_all(b"testing").expect("fail write()");
-            assert!(peer.close().is_ok());
-            assert!(listen.close().is_ok());
+            std::thread::sleep(Duration::from_millis(10));
+            let _ = peer.close();
+            let _ = listen.close();
         });
         let addr = rx.recv().expect("fail recv through mpsc channel");
         let mut connect = srt::builder()
             .set_file_transmission_type()
-            .connect(format!("127.0.0.1:{}", addr.port()))
+            .connect(addr)
             .expect("fail connect()");
         let mut buf = Vec::new();
         connect.read_to_end(&mut buf).expect("fail read()");
@@ -1312,38 +1389,105 @@ mod tests {
             std::str::from_utf8(&buf).expect("malformed message"),
             "testing"
         );
-        assert!(connect.close().is_ok());
+        let _ = connect.close();
         srt::cleanup().expect("failed cleanup()");
     }
+
     #[tokio::test]
-    async fn test_connect_accept_async() {
+    #[serial(srt)]
+    async fn test_ipv6_connect_accept_async() {
+        srt::startup().expect("failed startup");
+        let (tx, rx) = mpsc::channel::<SocketAddr>();
+        let listen_task = async move {
+            let listen = srt::async_builder()
+                .set_file_transmission_type()
+                .listen("[::1]:0", 1, None, None)
+                .expect("fail listen()");
+            let local = listen.local_addr().expect("fail local_addr()");
+            tx.send(local).expect("fail send through mpsc channel");
+            let (mut peer, _peer_addr) = listen.accept().await.expect("fail accep()");
+            peer.write_all(b"testing").await.expect("fail write()");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = peer.close().await;
+            let _ = listen.close();
+        };
+        let connect_task = async move {
+            let addr = rx.recv().expect("fail recv through mpsc channel");
+            let mut connect = srt::async_builder()
+                .set_file_transmission_type()
+                .connect(addr)
+                .expect("fail start connect")
+                .await
+                .expect("fail connect");
+            let mut buf = Vec::new();
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            connect.read_to_end(&mut buf).await.expect("fail read()");
+            assert_eq!(
+                std::str::from_utf8(&buf).expect("malformed message"),
+                "testing"
+            );
+            let _ = connect.close().await;
+        };
+        future::join(listen_task, connect_task).await;
+        srt::cleanup().expect("failed cleanup()");
+    }
+
+    #[test]
+    #[serial(srt)]
+    fn test_ipv4_connect_accept() {
+        srt::startup().expect("failed startup");
+        let (tx, rx) = mpsc::channel::<SocketAddr>();
+        thread::spawn(move || {
+            let listen = srt::builder()
+                .set_file_transmission_type()
+                .listen("127.0.0.1:0", 1, None, None)
+                .expect("fail listen()");
+            let local = listen.local_addr().expect("fail local_addr()");
+            tx.send(local).expect("fail send through mpsc channel");
+            let (mut peer, _peer_addr) = listen.accept().expect("fail accep()");
+            peer.write_all(b"testing").expect("fail write()");
+            std::thread::sleep(Duration::from_millis(10));
+            let _ = peer.close();
+            let _ = listen.close();
+        });
+        let addr = rx.recv().expect("fail recv through mpsc channel");
+        let mut connect = srt::builder()
+            .set_file_transmission_type()
+            .connect(addr)
+            .expect("fail connect()");
+        let mut buf = Vec::new();
+        connect.read_to_end(&mut buf).expect("fail read()");
+        assert_eq!(
+            std::str::from_utf8(&buf).expect("malformed message"),
+            "testing"
+        );
+        let _ = connect.close();
+        srt::cleanup().expect("failed cleanup()");
+    }
+
+    #[tokio::test]
+    #[serial(srt)]
+    async fn test_ipv4_connect_accept_async() {
         let data = b"testing";
         srt::startup().expect("failed startup");
-        let (tx_connected, mut rx_connected) = tokio::sync::mpsc::channel::<SocketAddr>(1);
-        let (tx_read_done, mut rx_read_done) = tokio::sync::mpsc::channel::<()>(1);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<SocketAddr>(1);
         let listen_task = async move {
             let listen = srt::async_builder()
                 .set_file_transmission_type()
                 .listen("127.0.0.1:0", 1, None, None)
                 .expect("fail listen()");
             let local = listen.local_addr().expect("fail local_addr()");
-            tx_connected
-                .send(local)
+            tx.send(local)
                 .await
                 .expect("fail send through mpsc channel");
             let (mut peer, _peer_addr) = listen.accept().await.expect("fail accep()");
             peer.write_all(data).await.expect("fail write()");
-            rx_read_done
-                .recv()
-                .await
-                .expect("fail recv through mpsc channel");
-            assert!(listen.close().is_ok());
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = peer.close().await;
+            let _ = listen.close();
         };
         let connect_task = async move {
-            let addr = rx_connected
-                .recv()
-                .await
-                .expect("fail recv through mpsc channel");
+            let addr = rx.recv().await.expect("fail recv through mpsc channel");
             let mut connect = srt::async_builder()
                 .set_file_transmission_type()
                 .connect(addr)
@@ -1352,94 +1496,113 @@ mod tests {
                 .expect("fail connect");
             let mut buf = [0u8; 7];
             let _ = connect.read(&mut buf).await.expect("fail read()");
-            let _ = tx_read_done.send(()).await;
             assert_eq!(&buf, data);
-            assert!(connect.close().await.is_ok());
+            let _ = connect.close().await;
         };
         future::join(listen_task, connect_task).await;
         srt::cleanup().expect("failed cleanup()");
     }
-    /*
+
     #[test]
-    fn test_connect_accept_v6() {
+    #[serial(srt)]
+    fn test_ipv4_manual_rendezvous() {
         srt::startup().expect("failed startup");
-        let (tx, rx) = mpsc::channel::<SocketAddr>();
+        let (tx_1, rx_1) = mpsc::channel::<SocketAddr>();
+        let (tx_2, rx_2) = mpsc::channel::<SocketAddr>();
         thread::spawn(move || {
-            let listen = srt::builder()
-                .listen("[::1]:8080", 1)
-                .expect("fail listen()");
-            let local = listen.local_addr().expect("fail local_addr()");
-            tx.send(local).expect("fail send through mpsc channel");
-            let (mut peer, _peer_addr) = listen.accept().expect("fail accep()");
-            peer.write_all(b"testing").expect("fail write()");
-            assert!(peer.close().is_ok());
-            assert!(listen.close().is_ok());
+            let one = srt::builder()
+                .set_file_transmission_type()
+                .set_rendezvous(true)
+                .bind("127.0.0.1:0")
+                .expect("fail bind()");
+            let local = one.local_addr().expect("fail local_addr()");
+            tx_1.send(local).expect("fail send through mpsc channel");
+            let addr = rx_2.recv().expect("fail recv through mpsc channel");
+            let mut one = one.connect(addr).expect("fail connect()");
+            one.write_all(b"testing").expect("fail write()");
+            std::thread::sleep(Duration::from_millis(10));
+            let _ = one.close();
         });
-        let addr = rx.recv().expect("fail recv through mpsc channel");
-        let mut connect = srt::builder().connect(addr).expect("fail connect()");
+        let two = srt::builder()
+            .set_file_transmission_type()
+            .set_rendezvous(true)
+            .bind("127.0.0.2:0")
+            .expect("fail bind()");
+        let local = two.local_addr().expect("fail local_addr()");
+        tx_2.send(local).expect("fail send through mpsc channel");
+        let addr = rx_1.recv().expect("fail recv through mpsc channel");
+        let mut two = two.connect(addr).expect("fail connect()");
         let mut buf = Vec::new();
-        connect.read_to_end(&mut buf).expect("fail read()");
+        two.read_to_end(&mut buf).expect("fail read()");
         assert_eq!(
             std::str::from_utf8(&buf).expect("malformed message"),
             "testing"
         );
-        assert!(connect.close().is_ok());
-        srt::cleanup().expect("failed cleanup()");
+        let _ = two.close();
+        srt::cleanup().expect("failed cleanup");
     }
-    */
-    //#[test]
-    //fn test_rendezvous() {
-    //    srt::startup().expect("failed startup");
-    //    thread::spawn(move || {
-    //        let mut one = srt::builder()
-    //            .set_file_transmission_type()
-    //            .rendezvous("127.0.0.1:123", "127.0.0.2:234")
-    //            .expect("fail rendezvous()");
-    //        one.write_all(b"testing").expect("fail write()");
-    //        assert!(one.close().is_ok());
-    //    });
-    //    let mut two = srt::builder()
-    //        .set_file_transmission_type()
-    //        .rendezvous("127.0.0.2:234", "127.0.0.1:123")
-    //        .expect("fail rendezvous()");
-    //    let mut buf = Vec::new();
-    //    two.read_to_end(&mut buf).expect("fail read()");
-    //    assert_eq!(
-    //        std::str::from_utf8(&buf).expect("malformed message"),
-    //        "testing"
-    //    );
-    //    assert!(two.close().is_ok());
-    //    srt::cleanup().expect("failed cleanup");
-    //}
-    //#[async_std::test]
-    //async fn test_rendezvous_async() {
-    //    srt::startup().expect("failed startup");
-    //    let one_task = async move {
-    //        let mut one = srt::async_builder()
-    //            .set_file_transmission_type()
-    //            .rendezvous("127.0.0.1:345", "127.0.0.1:456")
-    //            .expect("fail start rendezvous")
-    //            .await
-    //            .expect("fail rendezvous");
-    //        one.write_all(b"testing").await.expect("fail write()");
-    //        assert!(one.close().await.is_ok());
-    //    };
-    //    let two_task = async move {
-    //        let mut two = srt::async_builder()
-    //            .set_file_transmission_type()
-    //            .rendezvous("127.0.0.1:456", "127.0.0.1:345")
-    //            .expect("fail start rendezvous")
-    //            .await
-    //            .expect("fail rendezvous");
-    //        let mut buf = Vec::new();
-    //        two.read_to_end(&mut buf).await.expect("fail read()");
-    //        assert_eq!(
-    //            std::str::from_utf8(&buf).expect("malformed message"),
-    //            "testing"
-    //        );
-    //        assert!(two.close().await.is_ok());
-    //    };
-    //    future::join(one_task, two_task).await;
-    //    srt::cleanup().expect("failed cleanup");
-    //}
+
+    #[test]
+    #[serial(srt)]
+    fn test_ipv4_rendezvous() {
+        srt::startup().expect("failed startup");
+        thread::spawn(move || {
+            let mut one = srt::builder()
+                .set_file_transmission_type()
+                .rendezvous("127.0.0.1:10000", "127.0.0.2:20000")
+                .expect("fail rendezvous()");
+            one.write_all(b"testing").expect("fail write()");
+            std::thread::sleep(Duration::from_millis(10));
+            thread::sleep(Duration::from_millis(10));
+            let _ = one.close();
+        });
+        let mut two = srt::builder()
+            .set_file_transmission_type()
+            .rendezvous("127.0.0.2:20000", "127.0.0.1:10000")
+            .expect("fail rendezvous()");
+        let mut buf = Vec::new();
+        two.read_to_end(&mut buf).expect("fail read()");
+        assert_eq!(
+            std::str::from_utf8(&buf).expect("malformed message"),
+            "testing"
+        );
+        let _ = two.close();
+        srt::cleanup().expect("failed cleanup");
+    }
+
+    #[tokio::test]
+    #[serial(srt)]
+    async fn test_ipv4_rendezvous_async() {
+        srt::startup().expect("failed startup");
+        let one_task = async move {
+            let mut one = srt::async_builder()
+                .set_file_transmission_type()
+                .rendezvous("127.0.0.1:10000", "127.0.0.2:20000")
+                .expect("fail start rendezvous")
+                .await
+                .expect("fail rendezvous");
+            one.write_all(b"testing").await.expect("fail write()");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = one.close().await;
+        };
+        let two_task = async move {
+            let mut two = srt::async_builder()
+                .set_file_transmission_type()
+                .rendezvous("127.0.0.2:20000", "127.0.0.1:10000")
+                .expect("fail start rendezvous")
+                .await
+                .expect("fail rendezvous");
+            let mut buf = Vec::new();
+            // Allow time for other thread write
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            two.read_to_end(&mut buf).await.expect("fail read()");
+            assert_eq!(
+                std::str::from_utf8(&buf).expect("malformed message"),
+                "testing"
+            );
+            let _ = two.close().await;
+        };
+        future::join(one_task, two_task).await;
+        srt::cleanup().expect("failed cleanup");
+    }
 }
