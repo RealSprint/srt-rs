@@ -25,6 +25,7 @@ use std::{
     sync::Arc,
     task::Waker,
     thread,
+    time::Duration,
 };
 
 pub use socket::{
@@ -825,6 +826,7 @@ impl SrtAsyncListener {
                 let res = epoll.wait(-1);
                 if let Err(err) = res {
                     error!("SRT async accept epoll wait error: {}", err);
+                    thread::sleep(Duration::from_millis(1000));
                     continue;
                 }
 
