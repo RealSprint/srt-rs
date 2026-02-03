@@ -820,7 +820,13 @@ impl SrtAsyncListener {
         let condvar = self.condvar.clone();
 
         thread::spawn(move || {
-            while epoll.wait(-1).is_ok() {
+            loop {
+                let res = epoll.wait(-1);
+                if let Err(err) = res {
+                    eprintln!("SRT async accept epoll wait error: {}", err);
+                    continue;
+                }
+
                 let mut shared = shared.lock();
 
                 shared.has_data = true;
