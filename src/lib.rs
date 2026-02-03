@@ -12,6 +12,7 @@ use futures::{
 };
 use parking_lot::{Condvar, Mutex};
 use srt::{SRT_EPOLL_OPT, SRT_TRACEBSTATS};
+use tracing::error;
 
 use std::{
     convert::TryInto,
@@ -823,7 +824,7 @@ impl SrtAsyncListener {
             loop {
                 let res = epoll.wait(-1);
                 if let Err(err) = res {
-                    eprintln!("SRT async accept epoll wait error: {}", err);
+                    error!("SRT async accept epoll wait error: {}", err);
                     continue;
                 }
 
