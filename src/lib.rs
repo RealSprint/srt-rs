@@ -12,6 +12,7 @@ use futures::{
 };
 use parking_lot::{Condvar, Mutex};
 use srt::{SRT_EPOLL_OPT, SRT_TRACEBSTATS};
+use tracing::error;
 
 use std::{
     convert::TryInto,
@@ -24,6 +25,7 @@ use std::{
     sync::Arc,
     task::Waker,
     thread,
+    time::Duration,
 };
 
 pub use socket::{
@@ -820,7 +822,14 @@ impl SrtAsyncListener {
         let condvar = self.condvar.clone();
 
         thread::spawn(move || {
-            while epoll.wait(-1).is_ok() {
+            loop {
+                let res = epoll.wait(-1);
+                if let Err(err) = res {
+                    error!("SRT async accept epoll wait error: {}", err);
+                    thread::sleep(Duration::from_millis(1000));
+                    continue;
+                }
+
                 let mut shared = shared.lock();
 
                 shared.has_data = true;
