@@ -32,6 +32,8 @@ pub use socket::{
     SrtCongestionController, SrtKmState, SrtSocket, SrtSocketStatus, SrtTransmissionType,
 };
 
+const EPOLL_TIMEOUT: i64 = 5000;
+
 type Result<T> = std::result::Result<T, SrtError>;
 
 pub fn startup() -> Result<()> {
@@ -672,7 +674,7 @@ impl AsyncRead for SrtAsyncStream {
                     let epoll = self.epoll.clone();
 
                     tokio::task::spawn_blocking(move || {
-                        if epoll.wait(-1).is_ok() {
+                        if epoll.wait(EPOLL_TIMEOUT).is_ok() {
                             waker.wake();
                         }
                     });
@@ -702,7 +704,7 @@ impl AsyncWrite for SrtAsyncStream {
                             let epoll = self.epoll.clone();
 
                             tokio::task::spawn_blocking(move || {
-                                if epoll.wait(-1).is_ok() {
+                                if epoll.wait(EPOLL_TIMEOUT).is_ok() {
                                     waker.wake();
                                 }
                             });
@@ -728,7 +730,7 @@ impl AsyncWrite for SrtAsyncStream {
                     let epoll = self.epoll.clone();
 
                     tokio::task::spawn_blocking(move || {
-                        if epoll.wait(-1).is_ok() {
+                        if epoll.wait(EPOLL_TIMEOUT).is_ok() {
                             waker.wake();
                         }
                     });
@@ -754,7 +756,7 @@ impl AsyncWrite for SrtAsyncStream {
                     let epoll = self.epoll.clone();
 
                     tokio::task::spawn_blocking(move || {
-                        if epoll.wait(-1).is_ok() {
+                        if epoll.wait(EPOLL_TIMEOUT).is_ok() {
                             waker.wake();
                         }
                     });
@@ -925,7 +927,7 @@ impl Future for ConnectFuture {
                             srt::SRT_EPOLL_OPT::SRT_EPOLL_OUT | srt::SRT_EPOLL_OPT::SRT_EPOLL_ERR;
                         epoll.add(&self.socket, &events)?;
                         tokio::task::spawn_blocking(move || {
-                            if epoll.wait(-1).is_ok() {
+                            if epoll.wait(EPOLL_TIMEOUT).is_ok() {
                                 waker.wake();
                             }
                         });
