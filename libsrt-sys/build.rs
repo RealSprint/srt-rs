@@ -3,21 +3,29 @@ use cmake;
 
 use std::{env, path::PathBuf};
 
+fn libsrt_cmake_config() -> cmake::Config {
+    let mut config = cmake::Config::new("libsrt");
+    // The vendored SRT CMake project still declares a very old minimum version.
+    // Modern CMake rejects that unless we raise the active policy floor.
+    config
+        .configure_arg("-DCMAKE_POLICY_VERSION_MINIMUM=3.10")
+        .define("ENABLE_APPS", "OFF");
+    config
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     if cfg!(unix) {
-        let dst = cmake::Config::new("libsrt")
-            .define("ENABLE_APPS", "OFF")
-            .build();
+        let dst = libsrt_cmake_config().build();
         let mut lib_dir = PathBuf::from(dst);
         lib_dir.push("lib");
         println!("cargo:rustc-link-search={}", lib_dir.display());
         println!("cargo:rustc-link-lib=srt");
     } else if cfg!(windows) {
-        let dst = cmake::Config::new("libsrt")
-            .generator("Visual Studio 16 2019")
+        let dst = libsrt_cmake_config()
+            // Let the cmake crate select the installed Visual Studio generator
+            // instead of pinning an old version like VS2019.
             .cxxflag("/EHs")
             .define("ENABLE_STDCXX_SYNC", "ON")
-            .define("ENABLE_APPS", "OFF")
             .build();
         let mut lib_dir = PathBuf::from(dst.clone());
         lib_dir.push("lib");
