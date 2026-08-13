@@ -22,7 +22,10 @@ use std::{
     ops::Drop,
     os::raw::{c_int, c_void},
     pin::Pin,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     task::Waker,
     thread,
     time::Duration,
@@ -33,6 +36,35 @@ pub use socket::{
 };
 
 const EPOLL_TIMEOUT: i64 = 5000;
+
+/// How long the accept waker blocks in `srt_epoll_uwait` before looking at its shutdown flag.
+///
+/// Deliberately shorter than [`EPOLL_TIMEOUT`]: this bounds how long `Drop for SrtAsyncListener`
+/// blocks joining the thread, and a dropped listener should not stall the caller for seconds. The
+/// cost of the shorter interval is four wakeups per second per listener, which is nothing next to
+/// what libsrt's own housekeeping threads already do.
+const ACCEPT_EPOLL_TIMEOUT: i64 = 250;
+
+/// Backoff after an epoll error, so a persistently failing socket does not spin or flood the log.
+const ACCEPT_EPOLL_ERROR_BACKOFF: Duration = Duration::from_millis(1000);
+
+/// Granularity at which a backoff re-checks the shutdown flag.
+const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Sleeps for `total`, giving up early once `shutdown` is set.
+fn sleep_unless_shutdown(shutdown: &AtomicBool, total: Duration) {
+    let mut slept = Duration::ZERO;
+
+    while slept < total {
+        if shutdown.load(Ordering::Acquire) {
+            return;
+        }
+
+        let slice = SHUTDOWN_POLL_INTERVAL.min(total - slept);
+        thread::sleep(slice);
+        slept += slice;
+    }
+}
 
 type Result<T> = std::result::Result<T, SrtError>;
 
@@ -778,6 +810,9 @@ pub struct SrtAsyncListener {
     socket: SrtSocket,
     shared: Arc<Mutex<SrtAsyncAcceptShared>>,
     condvar: Arc<Condvar>,
+    shutdown: Arc<AtomicBool>,
+    /// Always `Some` until [`Drop`] takes it to join the thread.
+    waker_thread: Option<thread::JoinHandle<()>>,
 }
 
 struct SrtAsyncAcceptShared {
@@ -792,15 +827,19 @@ impl SrtAsyncListener {
             waker: None,
         }));
 
-        let s = Self {
+        let condvar = Arc::new(Condvar::new());
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let waker_thread =
+            Self::spawn_waker(&socket, shared.clone(), condvar.clone(), shutdown.clone())?;
+
+        Ok(Self {
             socket,
             shared,
-            condvar: Arc::new(Condvar::new()),
-        };
-
-        s.spawn_waker()?;
-
-        Ok(s)
+            condvar,
+            shutdown,
+            waker_thread: Some(waker_thread),
+        })
     }
     pub fn accept(&self) -> AcceptFuture {
         AcceptFuture {
@@ -816,20 +855,32 @@ impl SrtAsyncListener {
         self.socket.local_addr()
     }
 
-    fn spawn_waker(&self) -> Result<()> {
+    /// Starts the thread that watches the listening socket and wakes a pending [`AcceptFuture`].
+    ///
+    /// The thread owns its [`Epoll`], so the epoll id is released with `srt_epoll_release` when the
+    /// thread returns. It must therefore be joined before the socket is closed - see [`Drop`].
+    fn spawn_waker(
+        socket: &SrtSocket,
+        shared: Arc<Mutex<SrtAsyncAcceptShared>>,
+        condvar: Arc<Condvar>,
+        shutdown: Arc<AtomicBool>,
+    ) -> Result<thread::JoinHandle<()>> {
         let mut epoll = Epoll::new()?;
-        epoll.add(&self.socket, &srt::SRT_EPOLL_OPT::SRT_EPOLL_IN)?;
+        epoll.add(socket, &srt::SRT_EPOLL_OPT::SRT_EPOLL_IN)?;
 
-        let shared = self.shared.clone();
-        let condvar = self.condvar.clone();
-
-        thread::spawn(move || {
-            loop {
-                let res = epoll.wait(-1);
-                if let Err(err) = res {
-                    error!("SRT async accept epoll wait error: {}", err);
-                    thread::sleep(Duration::from_millis(1000));
-                    continue;
+        Ok(thread::spawn(move || {
+            while !shutdown.load(Ordering::Acquire) {
+                match epoll.wait(ACCEPT_EPOLL_TIMEOUT) {
+                    // A timeout comes back as an empty set. It must NOT be reported as readable:
+                    // `AcceptFuture` calls `srt_accept` when `has_data` is set, and the SRT docs
+                    // are explicit that it must not be called with nothing pending.
+                    Ok(ready) if ready.is_empty() => continue,
+                    Ok(_) => (),
+                    Err(err) => {
+                        error!("SRT async accept epoll wait error: {}", err);
+                        sleep_unless_shutdown(&shutdown, ACCEPT_EPOLL_ERROR_BACKOFF);
+                        continue;
+                    }
                 }
 
                 let mut shared = shared.lock();
@@ -840,17 +891,32 @@ impl SrtAsyncListener {
                 }
 
                 // Avoid checking epoll status again until we've given the future a chance to
-                // fetch data.
-                condvar.wait(&mut shared);
+                // fetch data. Bounded rather than an open-ended wait, so a shutdown that lands
+                // between the flag being set and this thread parking is still noticed.
+                condvar.wait_for(
+                    &mut shared,
+                    Duration::from_millis(ACCEPT_EPOLL_TIMEOUT as u64),
+                );
             }
-        });
-
-        Ok(())
+        }))
     }
 }
 
 impl Drop for SrtAsyncListener {
     fn drop(&mut self) {
+        // Stop the waker before the socket goes away. It calls into libsrt on every iteration and
+        // holds an `Epoll` registered against this very socket, so leaving it running means a
+        // thread reaching into libsrt for the rest of the process's life - long after the listener
+        // it belongs to is gone, and straight through `srt_cleanup` and global teardown.
+        self.shutdown.store(true, Ordering::Release);
+        self.condvar.notify_all();
+
+        if let Some(waker_thread) = self.waker_thread.take() {
+            // The join is bounded by ACCEPT_EPOLL_TIMEOUT, plus one SHUTDOWN_POLL_INTERVAL if the
+            // thread happened to be in its error backoff.
+            let _ = waker_thread.join();
+        }
+
         let _ = self.socket.close();
     }
 }
@@ -1370,6 +1436,77 @@ mod tests {
         thread::{self},
         time::Duration,
     };
+
+    /// Number of OS threads in this process, from `/proc/self/task`.
+    fn live_thread_count() -> usize {
+        std::fs::read_dir("/proc/self/task")
+            .expect("read /proc/self/task")
+            .count()
+    }
+
+    /// Waits for the thread count to come back down, so the assertion is not racing teardown.
+    fn wait_for_thread_count(target: usize, timeout: Duration) -> usize {
+        let deadline = std::time::Instant::now() + timeout;
+
+        loop {
+            let count = live_thread_count();
+            if count <= target || std::time::Instant::now() >= deadline {
+                return count;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    /// `SrtAsyncListener` used to spawn a detached thread that looped on `epoll.wait(-1)` forever,
+    /// with no shutdown signal and no join. One leaked per listener, each holding an `Epoll` that
+    /// was never released, still calling into libsrt long after its listener was gone - including
+    /// during `srt_cleanup` and process teardown.
+    #[test]
+    #[serial(srt)]
+    fn dropping_an_async_listener_stops_its_waker_thread() {
+        srt::startup().expect("failed startup");
+
+        // Take the baseline with one listener already up, so libsrt's own housekeeping threads
+        // (GC, send and receive queue workers) are running and not counted as our leak.
+        let warmup = srt::async_builder()
+            .set_live_transmission_type()
+            .listen("127.0.0.1:0", 1, None, None)
+            .expect("fail listen()");
+        let baseline = wait_for_thread_count(0, Duration::from_secs(2));
+
+        const LISTENERS: usize = 8;
+        let listeners: Vec<_> = (0..LISTENERS)
+            .map(|_| {
+                srt::async_builder()
+                    .set_live_transmission_type()
+                    .listen("127.0.0.1:0", 1, None, None)
+                    .expect("fail listen()")
+            })
+            .collect();
+
+        let with_listeners = live_thread_count();
+        assert!(
+            with_listeners >= baseline + LISTENERS,
+            "each listener should have started a waker thread: {} threads, baseline {}",
+            with_listeners,
+            baseline
+        );
+
+        drop(listeners);
+
+        // Drop joins each waker, so by here they are already gone; the wait only absorbs libsrt's
+        // own churn from closing the sockets.
+        let after = wait_for_thread_count(baseline, Duration::from_secs(10));
+        assert!(
+            after <= baseline,
+            "waker threads outlived their listeners: {} threads, baseline {}",
+            after,
+            baseline
+        );
+
+        drop(warmup);
+        srt::cleanup().expect("failed cleanup");
+    }
 
     #[test]
     #[serial(srt)]
