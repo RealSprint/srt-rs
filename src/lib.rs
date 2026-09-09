@@ -33,6 +33,9 @@ pub use socket::{
 };
 
 const EPOLL_TIMEOUT: i64 = 5000;
+/// Upper bound on how long the async accept worker sleeps between shutdown
+/// checks. This is also the worst-case time `SrtAsyncListener::close` and
+/// `Drop` block while joining the worker.
 const WAKER_POLL_TIMEOUT: i64 = 100;
 
 type Result<T> = std::result::Result<T, SrtError>;
@@ -816,6 +819,11 @@ impl SrtAsyncListener {
             condvar: self.condvar.clone(),
         }
     }
+    /// Stops the accept worker and closes the socket.
+    ///
+    /// Blocks for at most `WAKER_POLL_TIMEOUT` while the worker exits. `Drop`
+    /// does the same, so avoid dropping a listener on a thread that must not
+    /// block.
     pub fn close(mut self) -> Result<()> {
         self.close_inner()
     }
