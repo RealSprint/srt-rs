@@ -777,6 +777,7 @@ impl Drop for SrtAsyncStream {
 
 pub struct SrtAsyncListener {
     socket: SrtSocket,
+    socket_closed: bool,
     shared: Arc<Mutex<SrtAsyncAcceptShared>>,
     condvar: Arc<Condvar>,
     waker_thread: Option<thread::JoinHandle<()>>,
@@ -798,6 +799,7 @@ impl SrtAsyncListener {
 
         let mut s = Self {
             socket,
+            socket_closed: false,
             shared,
             condvar: Arc::new(Condvar::new()),
             waker_thread: None,
@@ -814,8 +816,8 @@ impl SrtAsyncListener {
             condvar: self.condvar.clone(),
         }
     }
-    pub fn close(self) -> Result<()> {
-        self.socket.close()
+    pub fn close(mut self) -> Result<()> {
+        self.close_inner()
     }
     pub fn local_addr(&self) -> Result<SocketAddr> {
         self.socket.local_addr()
@@ -871,13 +873,21 @@ impl SrtAsyncListener {
             let _ = handle.join();
         }
     }
+
+    fn close_inner(&mut self) -> Result<()> {
+        if self.socket_closed {
+            return Ok(());
+        }
+        // Joining also releases the worker's epoll before closing the socket.
+        self.stop_waker();
+        self.socket_closed = true;
+        self.socket.close()
+    }
 }
 
 impl Drop for SrtAsyncListener {
     fn drop(&mut self) {
-        // Joining also releases the worker's epoll before closing the socket.
-        self.stop_waker();
-        let _ = self.socket.close();
+        let _ = self.close_inner();
     }
 }
 
@@ -1420,6 +1430,38 @@ mod tests {
             .listen("127.0.0.1:0", 1, None, None)
             .unwrap();
         assert_listener_worker_stops(listener);
+        srt::cleanup().unwrap();
+    }
+
+    #[test]
+    #[serial(srt)]
+    fn test_async_listener_close() {
+        srt::startup().unwrap();
+        let listener = srt::async_builder()
+            .listen("127.0.0.1:0", 1, None, None)
+            .unwrap();
+        let shared = std::sync::Arc::downgrade(&listener.shared);
+        listener.close().unwrap();
+        assert!(shared.upgrade().is_none(), "listener worker is still alive");
+        srt::cleanup().unwrap();
+    }
+
+    #[test]
+    #[serial(srt)]
+    fn test_async_listener_close_is_idempotent() {
+        srt::startup().unwrap();
+        let mut listener = srt::async_builder()
+            .listen("127.0.0.1:0", 1, None, None)
+            .unwrap();
+        listener.close_inner().unwrap();
+        assert!(
+            listener.socket.local_addr().is_err(),
+            "socket is still open"
+        );
+        // Explicit close and Drop share this path. Calling it again must not
+        // issue another native close, which would fail for the closed socket.
+        listener.close_inner().unwrap();
+        drop(listener);
         srt::cleanup().unwrap();
     }
 
