@@ -875,7 +875,15 @@ impl SrtAsyncListener {
 
     fn stop_waker(&mut self) {
         // Use the same mutex as the waiter so shutdown notifications cannot be lost.
-        self.shared.lock().shutdown = true;
+        let waker = {
+            let mut shared = self.shared.lock();
+            shared.shutdown = true;
+            // A pending `AcceptFuture` must be rescheduled so it can observe the shutdown.
+            shared.waker.take()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
         self.condvar.notify_all();
         if let Some(handle) = self.waker_thread.take() {
             let _ = handle.join();
@@ -909,6 +917,11 @@ impl Future for AcceptFuture {
     type Output = Result<(SrtAsyncStream, SocketAddr)>;
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut shared = self.shared.lock();
+
+        // The listener was closed or dropped. Its socket is gone, so never call `srt_accept`.
+        if shared.shutdown {
+            return Poll::Ready(Err(SrtError::Closed));
+        }
 
         // The [documentation](https://github.com/Haivision/srt/blob/master/docs/API/API-functions.md#srt_accept)
         // explicitly states that `srt_accept` should not be called when there is no data to be read.
@@ -1403,14 +1416,14 @@ impl Drop for Epoll {
 mod tests {
     use crate as srt;
     use futures::{
-        future,
+        future::{self, Future},
         io::{AsyncReadExt, AsyncWriteExt},
     };
     use serial_test::serial;
     use std::{
         io::{Read, Write},
         net::SocketAddr,
-        sync::mpsc,
+        sync::{mpsc, Arc, Mutex},
         thread::{self},
         time::Duration,
     };
@@ -1497,6 +1510,40 @@ mod tests {
         assert_listener_worker_stops(listener);
         drop(client);
         srt::cleanup().unwrap();
+    }
+
+    #[test]
+    #[serial(srt)]
+    fn test_async_listener_drop_wakes_pending_accept() {
+        srt::startup().unwrap();
+        let listener = srt::async_builder()
+            .listen("127.0.0.1:0", 1, None, None)
+            .unwrap();
+        let mut accept = Box::pin(listener.accept());
+
+        let (tx, rx) = mpsc::channel();
+        let waker = futures::task::waker(Arc::new(NotifyWaker(Mutex::new(tx))));
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(accept.as_mut().poll(&mut cx).is_pending());
+
+        drop(listener);
+        rx.recv_timeout(Duration::from_secs(2))
+            .expect("dropping the listener did not wake the pending accept");
+        match accept.as_mut().poll(&mut cx) {
+            std::task::Poll::Ready(Err(srt::error::SrtError::Closed)) => {}
+            std::task::Poll::Ready(Err(err)) => panic!("expected Closed error, got {:?}", err),
+            std::task::Poll::Ready(Ok(_)) => panic!("accept succeeded on a closed listener"),
+            std::task::Poll::Pending => panic!("accept is still pending after listener drop"),
+        }
+        srt::cleanup().unwrap();
+    }
+
+    struct NotifyWaker(Mutex<mpsc::Sender<()>>);
+
+    impl futures::task::ArcWake for NotifyWaker {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            let _ = arc_self.0.lock().unwrap().send(());
+        }
     }
 
     #[test]
