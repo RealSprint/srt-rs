@@ -126,15 +126,16 @@ impl SrtSocket {
         callback: srt_listen_callback_fn,
         callback_opaque: Option<*mut c_void>,
     ) -> Result<()> {
-        let result = unsafe { srt::srt_listen(self.id, backlog) };
-        error::handle_result((), result)?;
-
-        if callback.is_none() {
-            return Ok(());
+        // libsrt >= 1.5.4 rejects srt_listen_callback on a socket that is
+        // already listening (SRT_ECONNSOCK), so the hook has to be installed
+        // before srt_listen.
+        if callback.is_some() {
+            let opaque = callback_opaque.unwrap_or(std::ptr::null_mut());
+            let result = unsafe { srt::srt_listen_callback(self.id, callback, opaque) };
+            error::handle_result((), result)?;
         }
 
-        let opaque = callback_opaque.unwrap_or(std::ptr::null_mut());
-        let result = unsafe { srt::srt_listen_callback(self.id, callback, opaque) };
+        let result = unsafe { srt::srt_listen(self.id, backlog) };
         error::handle_result((), result)
     }
 }
