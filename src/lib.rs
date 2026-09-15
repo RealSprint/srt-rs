@@ -33,6 +33,10 @@ pub use socket::{
 };
 
 const EPOLL_TIMEOUT: i64 = 5000;
+/// Upper bound on how long the async accept worker sleeps between shutdown
+/// checks. This is also the worst-case time `SrtAsyncListener::close` and
+/// `Drop` block while joining the worker.
+const WAKER_POLL_TIMEOUT: i64 = 100;
 
 type Result<T> = std::result::Result<T, SrtError>;
 
@@ -776,13 +780,16 @@ impl Drop for SrtAsyncStream {
 
 pub struct SrtAsyncListener {
     socket: SrtSocket,
+    socket_closed: bool,
     shared: Arc<Mutex<SrtAsyncAcceptShared>>,
     condvar: Arc<Condvar>,
+    waker_thread: Option<thread::JoinHandle<()>>,
 }
 
 struct SrtAsyncAcceptShared {
     has_data: bool,
     waker: Option<Waker>,
+    shutdown: bool,
 }
 
 impl SrtAsyncListener {
@@ -790,15 +797,18 @@ impl SrtAsyncListener {
         let shared = Arc::new(Mutex::new(SrtAsyncAcceptShared {
             has_data: false,
             waker: None,
+            shutdown: false,
         }));
 
-        let s = Self {
+        let mut s = Self {
             socket,
+            socket_closed: false,
             shared,
             condvar: Arc::new(Condvar::new()),
+            waker_thread: None,
         };
 
-        s.spawn_waker()?;
+        s.waker_thread = Some(s.spawn_waker()?);
 
         Ok(s)
     }
@@ -809,30 +819,45 @@ impl SrtAsyncListener {
             condvar: self.condvar.clone(),
         }
     }
-    pub fn close(self) -> Result<()> {
-        self.socket.close()
+    /// Stops the accept worker and closes the socket.
+    ///
+    /// Blocks for at most `WAKER_POLL_TIMEOUT` while the worker exits. `Drop`
+    /// does the same, so avoid dropping a listener on a thread that must not
+    /// block.
+    pub fn close(mut self) -> Result<()> {
+        self.close_inner()
     }
     pub fn local_addr(&self) -> Result<SocketAddr> {
         self.socket.local_addr()
     }
 
-    fn spawn_waker(&self) -> Result<()> {
+    fn spawn_waker(&self) -> Result<thread::JoinHandle<()>> {
         let mut epoll = Epoll::new()?;
         epoll.add(&self.socket, &srt::SRT_EPOLL_OPT::SRT_EPOLL_IN)?;
 
         let shared = self.shared.clone();
         let condvar = self.condvar.clone();
 
-        thread::spawn(move || {
-            loop {
-                let res = epoll.wait(-1);
-                if let Err(err) = res {
-                    error!("SRT async accept epoll wait error: {}", err);
-                    thread::sleep(Duration::from_millis(1000));
-                    continue;
+        Ok(thread::spawn(move || {
+            while !shared.lock().shutdown {
+                // Bound the wait so an idle listener can stop its worker.
+                match epoll.wait(WAKER_POLL_TIMEOUT) {
+                    Ok(events) if events.is_empty() => continue,
+                    Ok(_) => {}
+                    Err(err) => {
+                        error!("SRT async accept epoll wait error: {}", err);
+                        let mut shared = shared.lock();
+                        if !shared.shutdown {
+                            condvar.wait_for(&mut shared, Duration::from_secs(1));
+                        }
+                        continue;
+                    }
                 }
 
                 let mut shared = shared.lock();
+                if shared.shutdown {
+                    break;
+                }
 
                 shared.has_data = true;
                 if let Some(waker) = shared.waker.take() {
@@ -841,17 +866,44 @@ impl SrtAsyncListener {
 
                 // Avoid checking epoll status again until we've given the future a chance to
                 // fetch data.
-                condvar.wait(&mut shared);
+                while shared.has_data && !shared.shutdown {
+                    condvar.wait(&mut shared);
+                }
             }
-        });
+        }))
+    }
 
-        Ok(())
+    fn stop_waker(&mut self) {
+        // Use the same mutex as the waiter so shutdown notifications cannot be lost.
+        let waker = {
+            let mut shared = self.shared.lock();
+            shared.shutdown = true;
+            // A pending `AcceptFuture` must be rescheduled so it can observe the shutdown.
+            shared.waker.take()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+        self.condvar.notify_all();
+        if let Some(handle) = self.waker_thread.take() {
+            let _ = handle.join();
+        }
+    }
+
+    fn close_inner(&mut self) -> Result<()> {
+        if self.socket_closed {
+            return Ok(());
+        }
+        // Joining also releases the worker's epoll before closing the socket.
+        self.stop_waker();
+        self.socket_closed = true;
+        self.socket.close()
     }
 }
 
 impl Drop for SrtAsyncListener {
     fn drop(&mut self) {
-        let _ = self.socket.close();
+        let _ = self.close_inner();
     }
 }
 
@@ -865,6 +917,11 @@ impl Future for AcceptFuture {
     type Output = Result<(SrtAsyncStream, SocketAddr)>;
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut shared = self.shared.lock();
+
+        // The listener was closed or dropped. Its socket is gone, so never call `srt_accept`.
+        if shared.shutdown {
+            return Poll::Ready(Err(SrtError::Closed));
+        }
 
         // The [documentation](https://github.com/Haivision/srt/blob/master/docs/API/API-functions.md#srt_accept)
         // explicitly states that `srt_accept` should not be called when there is no data to be read.
@@ -1359,17 +1416,135 @@ impl Drop for Epoll {
 mod tests {
     use crate as srt;
     use futures::{
-        future,
+        future::{self, Future},
         io::{AsyncReadExt, AsyncWriteExt},
     };
     use serial_test::serial;
     use std::{
         io::{Read, Write},
         net::SocketAddr,
-        sync::mpsc,
+        sync::{mpsc, Arc, Mutex},
         thread::{self},
         time::Duration,
     };
+
+    fn assert_listener_worker_stops(listener: srt::SrtAsyncListener) {
+        // The worker owns this state until it exits. A weak reference lets us
+        // detect the original detached-thread leak without process-wide counters.
+        let shared = std::sync::Arc::downgrade(&listener.shared);
+        let (tx, rx) = mpsc::channel();
+        let dropper = thread::spawn(move || {
+            drop(listener);
+            tx.send(()).unwrap();
+        });
+        rx.recv_timeout(Duration::from_secs(2))
+            .expect("listener drop did not stop its worker");
+        dropper.join().unwrap();
+        assert!(shared.upgrade().is_none(), "listener worker is still alive");
+    }
+
+    #[test]
+    #[serial(srt)]
+    fn test_async_listener_drop_idle() {
+        srt::startup().unwrap();
+        let listener = srt::async_builder()
+            .listen("127.0.0.1:0", 1, None, None)
+            .unwrap();
+        assert_listener_worker_stops(listener);
+        srt::cleanup().unwrap();
+    }
+
+    #[test]
+    #[serial(srt)]
+    fn test_async_listener_close() {
+        srt::startup().unwrap();
+        let listener = srt::async_builder()
+            .listen("127.0.0.1:0", 1, None, None)
+            .unwrap();
+        let shared = std::sync::Arc::downgrade(&listener.shared);
+        listener.close().unwrap();
+        assert!(shared.upgrade().is_none(), "listener worker is still alive");
+        srt::cleanup().unwrap();
+    }
+
+    #[test]
+    #[serial(srt)]
+    fn test_async_listener_close_is_idempotent() {
+        srt::startup().unwrap();
+        let mut listener = srt::async_builder()
+            .listen("127.0.0.1:0", 1, None, None)
+            .unwrap();
+        listener.close_inner().unwrap();
+        assert!(
+            listener.socket.local_addr().is_err(),
+            "socket is still open"
+        );
+        // Explicit close and Drop share this path. Calling it again must not
+        // issue another native close, which would fail for the closed socket.
+        listener.close_inner().unwrap();
+        drop(listener);
+        srt::cleanup().unwrap();
+    }
+
+    #[test]
+    #[serial(srt)]
+    fn test_async_listener_drop_with_pending_connection() {
+        srt::startup().unwrap();
+        let listener = srt::async_builder()
+            .listen("127.0.0.1:0", 1, None, None)
+            .unwrap();
+        let client = srt::builder()
+            .connect(listener.local_addr().unwrap())
+            .unwrap();
+
+        // Wait until the worker has reported readiness and is waiting for an
+        // accept future. Never accept: dropping must wake this wait as well.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !listener.shared.lock().has_data {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "listener never became ready"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_listener_worker_stops(listener);
+        drop(client);
+        srt::cleanup().unwrap();
+    }
+
+    #[test]
+    #[serial(srt)]
+    fn test_async_listener_drop_wakes_pending_accept() {
+        srt::startup().unwrap();
+        let listener = srt::async_builder()
+            .listen("127.0.0.1:0", 1, None, None)
+            .unwrap();
+        let mut accept = Box::pin(listener.accept());
+
+        let (tx, rx) = mpsc::channel();
+        let waker = futures::task::waker(Arc::new(NotifyWaker(Mutex::new(tx))));
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(accept.as_mut().poll(&mut cx).is_pending());
+
+        drop(listener);
+        rx.recv_timeout(Duration::from_secs(2))
+            .expect("dropping the listener did not wake the pending accept");
+        match accept.as_mut().poll(&mut cx) {
+            std::task::Poll::Ready(Err(srt::error::SrtError::Closed)) => {}
+            std::task::Poll::Ready(Err(err)) => panic!("expected Closed error, got {:?}", err),
+            std::task::Poll::Ready(Ok(_)) => panic!("accept succeeded on a closed listener"),
+            std::task::Poll::Pending => panic!("accept is still pending after listener drop"),
+        }
+        srt::cleanup().unwrap();
+    }
+
+    struct NotifyWaker(Mutex<mpsc::Sender<()>>);
+
+    impl futures::task::ArcWake for NotifyWaker {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            let _ = arc_self.0.lock().unwrap().send(());
+        }
+    }
 
     #[test]
     #[serial(srt)]
