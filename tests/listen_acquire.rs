@@ -8,6 +8,7 @@ use std::{
 };
 
 use futures::future::select_all;
+use serial_test::serial;
 use socket2::{Domain, Protocol, Socket, Type};
 
 const CLIENTS: usize = 32;
@@ -42,6 +43,7 @@ fn receive_queue_threads() -> usize {
 /// Listeners sharing a port through SO_REUSEPORT each get their own multiplexer, and every
 /// connection is accepted under the socket id its listen callback saw.
 #[tokio::test]
+#[serial]
 async fn listeners_sharing_a_port_get_their_own_multiplexer() {
     srt_rs::startup().unwrap();
     let threads_before = receive_queue_threads();
@@ -107,5 +109,44 @@ async fn listeners_sharing_a_port_get_their_own_multiplexer() {
 
     drop(clients);
     drop(listeners);
+    srt_rs::cleanup().unwrap();
+}
+
+/// libsrt frees a closed socket's multiplexer, and with it the descriptor, on its own thread.
+fn port_is_released(addr: SocketAddr) -> bool {
+    (0..50).any(|_| {
+        std::thread::sleep(Duration::from_millis(100));
+        UdpSocket::bind(addr).is_ok()
+    })
+}
+
+#[test]
+#[serial]
+fn failed_listen_releases_the_acquired_socket() {
+    srt_rs::startup().unwrap();
+    let udp_socket = reuse_port_socket("127.0.0.1:0".parse().unwrap());
+    let addr = udp_socket.local_addr().unwrap();
+
+    let listener = srt_rs::async_builder().listen_acquire(udp_socket, 0, None, None);
+
+    assert!(listener.is_err(), "a zero backlog is rejected");
+    assert!(port_is_released(addr));
+    srt_rs::cleanup().unwrap();
+}
+
+#[test]
+#[serial]
+fn bound_socket_refuses_a_descriptor_and_leaves_it_to_rust() {
+    srt_rs::startup().unwrap();
+    let socket = srt_rs::SrtSocket::new()
+        .unwrap()
+        .bind("127.0.0.1:0")
+        .unwrap();
+    let udp_socket = reuse_port_socket("127.0.0.1:0".parse().unwrap());
+    let addr = udp_socket.local_addr().unwrap();
+
+    assert!(socket.bind_acquire(udp_socket).is_err());
+    assert!(UdpSocket::bind(addr).is_ok());
+    socket.close().unwrap();
     srt_rs::cleanup().unwrap();
 }

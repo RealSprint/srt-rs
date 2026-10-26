@@ -73,10 +73,15 @@ impl SrtSocket {
     /// `SO_REUSEPORT`, and closes the descriptor when that multiplexer goes away. libsrt applies
     /// `IPV6_V6ONLY` (`set_ipv6_only`) only to sockets it creates, so the caller sets it here.
     ///
-    /// On error libsrt may already have closed the descriptor, so it is never closed here.
+    /// Once libsrt has the descriptor it may close it on error, so a failed bind never closes it
+    /// here. A socket libsrt would reject outright is refused before the descriptor is handed over.
     #[cfg(unix)]
     pub fn bind_acquire(self, udp_socket: std::net::UdpSocket) -> Result<Self> {
         use std::os::fd::IntoRawFd;
+
+        if !matches!(self.get_socket_state()?, SrtSocketStatus::Init) {
+            return Err(SrtError::BoundSock);
+        }
 
         let result = unsafe { srt::srt_bind_acquire(self.id, udp_socket.into_raw_fd()) };
         error::handle_result(self, result)

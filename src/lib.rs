@@ -1066,9 +1066,15 @@ impl SrtAsyncBuilder {
         callback_opaque: Option<*mut c_void>,
     ) -> Result<SrtAsyncListener> {
         let socket = SrtSocket::new()?;
-        self.config_socket(&socket)?;
-        let socket = socket.bind_acquire(udp_socket)?;
-        socket.listen(backlog, callback, callback_opaque)?;
+        let listening = self
+            .config_socket(&socket)
+            .and_then(|_| socket.bind_acquire(udp_socket))
+            .and_then(|socket| socket.listen(backlog, callback, callback_opaque));
+        if let Err(err) = listening {
+            // Closing the socket also closes an acquired descriptor along with its multiplexer.
+            let _ = socket.close();
+            return Err(err);
+        }
 
         SrtAsyncListener::new(socket)
     }
