@@ -10,7 +10,7 @@ use std::{
 use futures::future::select_all;
 use socket2::{Domain, Protocol, Socket, Type};
 
-const CLIENTS: usize = 8;
+const CLIENTS: usize = 32;
 
 unsafe extern "C" fn record_socket(
     opaque: *mut c_void,
@@ -82,19 +82,28 @@ async fn listeners_sharing_a_port_get_their_own_multiplexer() {
     }
 
     let mut accepted = Vec::new();
+    let mut accepted_per_listener = [0; 2];
     while accepted.len() < CLIENTS {
         let accepts = listeners.iter().map(|listener| listener.accept());
-        let (result, _, _) = tokio::time::timeout(Duration::from_secs(5), select_all(accepts))
-            .await
-            .unwrap();
+        let (result, listener, _) =
+            tokio::time::timeout(Duration::from_secs(5), select_all(accepts))
+                .await
+                .unwrap();
         let (stream, _) = result.unwrap();
         accepted.push(stream.id());
+        accepted_per_listener[listener] += 1;
     }
 
     let mut seen_ids = seen.lock().unwrap().clone();
     seen_ids.sort();
     accepted.sort();
     assert_eq!(accepted, seen_ids);
+    // The kernel hashes each client's address; all of them landing on one listener is a 2^-31 chance.
+    assert!(
+        accepted_per_listener.iter().all(|&count| count > 0),
+        "{:?}",
+        accepted_per_listener
+    );
 
     drop(clients);
     drop(listeners);

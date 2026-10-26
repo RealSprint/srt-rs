@@ -70,7 +70,8 @@ impl SrtSocket {
     }
     /// Binds to a UDP socket the caller created and bound. libsrt gives it a multiplexer of its
     /// own (receive and send threads) even when other SRT sockets share the port through
-    /// `SO_REUSEPORT`, and closes the descriptor when that multiplexer goes away.
+    /// `SO_REUSEPORT`, and closes the descriptor when that multiplexer goes away. libsrt applies
+    /// `IPV6_V6ONLY` (`set_ipv6_only`) only to sockets it creates, so the caller sets it here.
     ///
     /// On error libsrt may already have closed the descriptor, so it is never closed here.
     #[cfg(unix)]
