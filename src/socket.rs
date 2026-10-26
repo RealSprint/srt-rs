@@ -68,6 +68,18 @@ impl SrtSocket {
         }
         Err(SrtError::SockFail)
     }
+    /// Binds to a UDP socket the caller created and bound. libsrt gives it a multiplexer of its
+    /// own (receive and send threads) even when other SRT sockets share the port through
+    /// `SO_REUSEPORT`, and closes the descriptor when that multiplexer goes away.
+    ///
+    /// On error libsrt may already have closed the descriptor, so it is never closed here.
+    #[cfg(unix)]
+    pub fn bind_acquire(self, udp_socket: std::net::UdpSocket) -> Result<Self> {
+        use std::os::fd::IntoRawFd;
+
+        let result = unsafe { srt::srt_bind_acquire(self.id, udp_socket.into_raw_fd()) };
+        error::handle_result(self, result)
+    }
     pub fn rendezvous<A: ToSocketAddrs>(&self, local: A, remote: A) -> Result<()> {
         let local_addr;
         if let Ok(mut addr) = local.to_socket_addrs() {

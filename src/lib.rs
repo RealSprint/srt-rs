@@ -536,6 +536,10 @@ impl SrtAsyncStream {
             epoll: Arc::new(epoll),
         })
     }
+    /// The libsrt socket id, the same id a listen callback receives for this connection.
+    pub fn id(&self) -> i32 {
+        self.socket.id
+    }
     pub fn local_addr(&self) -> Result<SocketAddr> {
         self.socket.local_addr()
     }
@@ -1049,6 +1053,22 @@ impl SrtAsyncBuilder {
         self.config_socket(&socket)?;
         let socket = socket.bind(addr)?;
         socket.listen(backlog, callback, callback_opaque)?; // Still synchronous
+
+        SrtAsyncListener::new(socket)
+    }
+    /// Listens on a UDP socket the caller created and bound, see [`SrtSocket::bind_acquire`].
+    #[cfg(unix)]
+    pub fn listen_acquire(
+        self,
+        udp_socket: std::net::UdpSocket,
+        backlog: i32,
+        callback: srt_listen_callback_fn,
+        callback_opaque: Option<*mut c_void>,
+    ) -> Result<SrtAsyncListener> {
+        let socket = SrtSocket::new()?;
+        self.config_socket(&socket)?;
+        let socket = socket.bind_acquire(udp_socket)?;
+        socket.listen(backlog, callback, callback_opaque)?;
 
         SrtAsyncListener::new(socket)
     }
