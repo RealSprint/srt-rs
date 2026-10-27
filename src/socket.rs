@@ -75,6 +75,8 @@ impl SrtSocket {
     ///
     /// Once libsrt has the descriptor it may close it on error, so a failed bind never closes it
     /// here. A socket libsrt would reject outright is refused before the descriptor is handed over.
+    /// The descriptor leaks if libsrt fails before taking it: `getsockname` fails on it, or a copy
+    /// of this `SrtSocket` binds it between that check and the call.
     #[cfg(unix)]
     pub fn bind_acquire(self, udp_socket: std::net::UdpSocket) -> Result<Self> {
         use std::os::fd::IntoRawFd;
